@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  f1-predictor:
+    build: .
+    image: f1-predictor:latest
+    env_file:
+      - .env  # Aquí guardaremos tus llaves de AWS de forma segura
+    volumes:
+      - ./data:/app/data        # Sincroniza datos crudos y procesados
+      - ./models:/app/models    # Sincroniza tus .pkl y .zip entrenados
+      - ./.fastf1_cache:/app/.fastf1_cache # Evita re-descargar datos de la API
+    # Por defecto no hace nada, tú le pasas el comando al arrancar
+    stdin_open: true
+    tty: true
+
+  # Opcional: Un servicio específico para el entrenamiento
+  trainer:
+    build: .
+    env_file:
+      - .env  # Aquí guardaremos tus llaves de AWS de forma segura
+    volumes:
+      - .:/app
+    command: python train.py --upload-s3

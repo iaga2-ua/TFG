@@ -1,0 +1,6 @@
+.fastf1_cache/
+data/raw/
+models/*.pkl
+models/*.zip
+__pycache__/
+.env

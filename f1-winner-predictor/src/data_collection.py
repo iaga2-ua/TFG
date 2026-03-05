@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import FASTF1_CACHE, RAW_DIR, TRAIN_SEASONS
+from src.circuit_metadata import get_circuit_meta_from_fastf1
 
 
 import numpy as np
@@ -40,11 +41,11 @@ def _extract_weather_stats(session) -> dict:
     The session must have been loaded with weather=True.
 
     Returns a dict with:
-      rain_probability   – fraction of session timestamps with Rainfall == True
-      is_wet_qualifying  – 1 if any rainfall was detected, else 0
-      track_temp_c       – mean track temperature (°C)
-      humidity_pct       – mean relative humidity (%)
-      wind_speed_ms      – mean wind speed (m/s)
+      rain_probability   - fraction of session timestamps with Rainfall == True
+      is_wet_qualifying  - 1 if any rainfall was detected, else 0
+      track_temp_c       - mean track temperature (°C)
+      humidity_pct       - mean relative humidity (%)
+      wind_speed_ms      - mean wind speed (m/s)
     """
     defaults = {
         "rain_probability":  0.0,
@@ -186,6 +187,9 @@ def fetch_season_results(year: int) -> pd.DataFrame:
             logger.warning(f"  ⚠  {year} R{round_num}: empty race results, skipping.")
             continue
 
+        # Circuit metadata from FastF1 (dynamic + static fields)
+        circuit_meta = get_circuit_meta_from_fastf1(session_race)
+
         # Weather features from qualifying session
         weather = _extract_weather_stats(session_quali)
 
@@ -233,6 +237,12 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                 # Practice pace
                 "fp2_long_run_pace_gap_s": p_data.get("fp2_long_run_pace_gap_s", np.nan),
                 "fp3_gap_to_best_s":       p_data.get("fp3_gap_to_best_s",       np.nan),
+                # Circuit metadata (FastF1 dynamic + static)
+                "track_length_km":          circuit_meta["track_length_km"],
+                "corner_count":             circuit_meta["corner_count"],
+                "overtake_difficulty":      circuit_meta["overtake_difficulty"],
+                "drs_zones":                circuit_meta["drs_zones"],
+                "avg_safety_car_prob":      circuit_meta["avg_safety_car_prob"],
             })
 
         logger.info(f"  ✓  {year} R{round_num}: {event_name} — {len(merged)} drivers"
@@ -358,6 +368,22 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         lambda a: practice_lookup.get(a, {}).get("fp3_gap_to_best_s", np.nan)
     )
 
+    # ── Circuit metadata (FastF1 dinamico + tabla estatica) ───────────────────
+    # Mismo flujo que en fetch_season_results para que entrenamiento e
+    # inferencia (Lambda y local) reciban exactamente las mismas columnas.
+    circuit_meta = get_circuit_meta_from_fastf1(session)
+    results["track_length_km"]     = circuit_meta["track_length_km"]
+    results["corner_count"]        = circuit_meta["corner_count"]
+    results["overtake_difficulty"] = circuit_meta["overtake_difficulty"]
+    results["drs_zones"]           = circuit_meta["drs_zones"]
+    results["avg_safety_car_prob"] = circuit_meta["avg_safety_car_prob"]
+    logger.info(
+        f"📐 Circuito: {circuit_meta['location']} — "
+        f"{circuit_meta['track_length_km']:.3f} km, "
+        f"{circuit_meta['corner_count']} curvas, "
+        f"{circuit_meta['drs_zones']} zonas DRS"
+    )
+
     keep_cols = [
         "year", "round", "event_name", "circuit",
         "driver_number", "driver_abbr", "full_name", "team",
@@ -367,6 +393,9 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         "track_temp_c", "humidity_pct", "wind_speed_ms",
         # practice pace
         "fp2_long_run_pace_gap_s", "fp3_gap_to_best_s",
+        # circuit metadata (FastF1)
+        "track_length_km", "corner_count",
+        "overtake_difficulty", "drs_zones", "avg_safety_car_prob",
     ]
     return results[[c for c in keep_cols if c in results.columns]]
 

@@ -36,6 +36,9 @@ FEATURE_COLS = [
     "constructor_champ_pos", "constructor_champ_points",
     "driver_avg_finish_l3", "driver_win_rate_l5", "driver_wet_win_rate",
     "driver_best_finish_circuit", "driver_avg_finish_circuit",
+    # Circuit metadata (FastF1 dinámico)
+    "track_length_km", "corner_count",
+    # Circuit metadata (tabla estática)
     "overtake_difficulty", "drs_zones", "avg_safety_car_prob",
     "race_number", "circuit_encoded", "constructor_encoded"
 ]
@@ -69,13 +72,21 @@ XGBOOST_PARAMS = {
 
 # ─── AWS & LOOKER STUDIO ─────────────────────────────────────────────────────
 AWS_REGION     = os.environ.get("AWS_DEFAULT_REGION", "eu-west-1")
+AWS_PROFILE    = os.environ.get("AWS_PROFILE", "default")
 S3_BUCKET      = os.environ.get("S3_BUCKET", "f1-winner-predictor-2026")
 
-# Keys para Looker Studio
-S3_HISTORY_KEY     = "predictions/history.csv"
+# Nombre de la Lambda que ejecuta XGBoost (inferencia en la nube)
+LAMBDA_FUNCTION_NAME = os.environ.get("LAMBDA_FUNCTION_NAME", "f1-winner-predictor")
+
+# ─── S3 KEYS ────────────────────────────────────────────────────────────────────
+S3_HISTORY_KEY     = "predictions/history.csv"     # historial unificado (input de Athena)
+S3_MODEL_KEY       = "models/xgboost_f1_winner.pkl" # artefacto XGBoost para Lambda
+S3_ENCODER_KEY     = "models/label_encoders.pkl"    # encoders compartidos con Lambda
 S3_IMPORTANCE_KEY  = "metrics/feature_importance.csv"
 S3_PERFORMANCE_KEY = "metrics/historical_performance.csv"
 
-# Athena
-ATHENA_DATABASE    = os.environ.get("ATHENA_DATABASE", "f1_predictions")
-ATHENA_OUTPUT_LOC  = f"s3://{S3_BUCKET}/athena-results/"
+# ─── ATHENA (motor SQL sobre S3 → Looker Studio) ──────────────────────────────────
+ATHENA_DATABASE          = os.environ.get("ATHENA_DATABASE",          "f1_predictions")
+ATHENA_TABLE             = os.environ.get("ATHENA_TABLE",             "race_predictions")
+ATHENA_TABLE_IMPORTANCE  = os.environ.get("ATHENA_TABLE_IMPORTANCE",  "feature_importance")
+ATHENA_OUTPUT_LOC        = f"s3://{S3_BUCKET}/athena-results/"

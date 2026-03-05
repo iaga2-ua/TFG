@@ -1,3 +1,15 @@
+"""
+predict_lambda.py -- Handler de AWS Lambda
+==========================================
+Flujo (nube, independiente de local):
+  1. EventBridge lo activa el sabado despues de la clasificacion.
+  2. Descarga XGBoost de S3 (subido por train.py).
+  3. Obtiene datos de clasificacion via FastF1.
+  4. Predice el ganador (piloto con mayor probabilidad).
+  5. Guarda una fila en S3: predictions/history.csv
+     (predicted_winner_xgb + win_prob_xgboost).
+"""
+
 import io
 import json
 import logging
@@ -10,7 +22,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Aseguramos que el path incluya la raíz para importar config y src
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CURRENT_SEASON, MODEL_FILE, ENCODER_FILE
@@ -22,13 +33,12 @@ from src.aws_utils import (
     read_history_csv,
 )
 
-# Configuración de Logging para AWS CloudWatch
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Caché en memoria (Warm Start)
-_XGB_MODEL   = None
-_ENCODERS    = None
+# Cache warm-start
+_XGB_MODEL = None
+_ENCODERS  = None
 
 def _load_models():
     """Descarga y carga modelos usando /tmp como puente."""
@@ -57,83 +67,72 @@ def _load_models():
     return _XGB_MODEL, _ENCODERS
 
 def predict(year: int, round_num: int, upload: bool = True) -> dict:
-    logger.info(f"🏎️ Iniciando predicción: {year} Ronda {round_num}")
+    logger.info("Iniciando prediccion XGBoost: %d Ronda %d", year, round_num)
 
-    # 1. Obtener datos de la clasificación (Snapshot)
     df_live = fetch_qualifying_snapshot(year, round_num)
     if df_live.empty:
-        raise ValueError(f"No se encontraron datos para {year} R{round_num}")
+        raise ValueError(f"No se encontraron datos de clasificacion para {year} R{round_num}")
 
-    # 2. Cargar cerebro (XGBoost)
     xgb_model, encoders = _load_models()
 
-    # 3. Obtener historial para rolling features
     try:
         history_df = read_history_csv()
-    except Exception as e:
-        logger.warning(f"No se pudo leer el historial, se usará DF vacío: {e}")
+    except Exception as exc:
+        logger.warning("Sin historial en S3, usando DF vacio: %s", exc)
         history_df = pd.DataFrame()
 
-    # 4. Ingeniería de variables (Inferencia)
-    X = apply_features(df_live, encoders, history_df=history_df)
-
-    # 5. Predicción de probabilidades
+    X     = apply_features(df_live, encoders, history_df=history_df)
     probs = xgb_model.predict_proba(X)[:, 1]
 
-    # 6. Formatear resultados (Cumpliendo con las 22 plazas de 2026)
-    results = df_live[[
-        "year", "round", "event_name", "circuit",
-        "driver_abbr", "team", "grid_position",
-    ]].copy()
-    
-    results["win_prob_xgboost"] = probs.astype(float)
-    results["win_prob_tabnet"] = 0.0  # Placeholder para el modelo local
-    results["prediction_timestamp"] = datetime.now(timezone.utc).isoformat()
-    results["actual_winner"] = 0     # Se actualizará post-carrera
-    
-    results = results.sort_values("win_prob_xgboost", ascending=False).reset_index(drop=True)
+    best_idx    = int(np.argmax(probs))
+    winner_abbr = df_live.iloc[best_idx]["driver_abbr"]
+    winner_prob = float(probs[best_idx])
+    event_name  = df_live.iloc[0]["event_name"]
+    circuit     = df_live.iloc[0]["circuit"]
 
-    # 7. Persistencia
+    result_row = {
+        "year":                 year,
+        "round":                round_num,
+        "event_name":           event_name,
+        "circuit":              circuit,
+        "predicted_winner_xgb": winner_abbr,
+        "win_prob_xgboost":     winner_prob,
+        "prediction_timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
     if upload:
-        append_to_history_csv(results)
-        logger.info("☁️ Resultados sincronizados con el historial en S3.")
+        append_to_history_csv(result_row)
+        logger.info("Resultado XGBoost guardado en S3: %s (%.1f%%)",
+                    winner_abbr, winner_prob * 100)
 
-    # Top 3 para la respuesta rápida de la Lambda
-    top3 = results.head(3).to_dict(orient="records")
-    
     return {
         "statusCode": 200,
         "body": {
-            "event": results.iloc[0]["event_name"],
-            "winner_predicted": results.iloc[0]["driver_abbr"],
-            "probability": f"{results.iloc[0]['win_prob_xgboost']:.2%}",
-            "top3": top3
-        }
+            "year":             year,
+            "round":            round_num,
+            "event":            event_name,
+            "predicted_winner": winner_abbr,
+            "win_probability":  f"{winner_prob:.1%}",
+        },
     }
 
 def lambda_handler(event, context):
     """Handler oficial para AWS Lambda."""
     try:
-        # Manejar si el evento viene de API Gateway o invocación directa
         if "body" in event and isinstance(event["body"], str):
             payload = json.loads(event["body"])
         else:
             payload = event
 
-        year = int(payload.get("year", CURRENT_SEASON))
+        year      = int(payload.get("year", CURRENT_SEASON))
         round_num = int(payload.get("round"))
-        upload = payload.get("upload", True)
+        upload    = payload.get("upload", True)
 
-        response = predict(year, round_num, upload)
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(response)
-        }
+        return predict(year, round_num, upload)
 
-    except Exception as e:
-        logger.error(f"❌ Error crítico: {str(e)}")
+    except Exception as exc:
+        logger.error("Error critico en Lambda: %s", exc)
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+            "body": json.dumps({"error": str(exc)}),
         }

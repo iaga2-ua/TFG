@@ -19,19 +19,23 @@ from config import (
     AWS_REGION, AWS_PROFILE,
     S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY,
     MODEL_FILE, ENCODER_FILE,
-    ATHENA_DATABASE, ATHENA_TABLE, ATHENA_OUTPUT_LOC,
+    ATHENA_DATABASE, ATHENA_TABLE, ATHENA_TABLE_IMPORTANCE,
+    ATHENA_OUTPUT_LOC,
 )
 
 logger = logging.getLogger(__name__)
 
-# --- Columnas finales para Looker Studio ---
+# --- Columnas del historial (UNA fila por carrera) ---
+# Lambda escribe: predicted_winner_xgb + win_prob_xgboost
+# Local  escribe: predicted_winner_tab + win_prob_tabnet
+# Post-carrera:   actual_winner + xgb_correct + tab_correct (via update_actual_winner)
 HISTORY_COLUMNS = [
     "year", "round", "event_name", "circuit",
-    "driver_abbr", "team", "grid_position",
-    "win_prob_xgboost", 
-    "win_prob_tabnet", 
-    "actual_winner", 
-    "prediction_timestamp"
+    "predicted_winner_xgb", "win_prob_xgboost",
+    "predicted_winner_tab", "win_prob_tabnet",
+    "actual_winner",
+    "xgb_correct", "tab_correct",
+    "prediction_timestamp",
 ]
 
 # ─── GESTIÓN DE SESIONES ──────────────────────────────────────────────────────
@@ -61,31 +65,55 @@ def read_history_csv() -> pd.DataFrame:
         logger.info("Creando nuevo archivo histórico en S3...")
         return pd.DataFrame(columns=HISTORY_COLUMNS)
 
-def append_to_history_csv(new_rows: pd.DataFrame) -> None:
-    """Combina predicciones y evita duplicados de los 22 pilotos."""
+def append_to_history_csv(new_row) -> None:
+    """
+    Upsert de UNA fila (una por carrera) en predictions/history.csv.
+
+    new_row puede ser:
+      - dict:           {"year": 2026, "round": 5, "predicted_winner_xgb": "VER", ...}
+      - DataFrame:      una sola fila con las mismas columnas
+
+    Estrategia:
+      - Lambda escribe predicted_winner_xgb (predicted_winner_tab = NaN).
+      - Local  escribe predicted_winner_tab (predicted_winner_xgb = NaN).
+      - update(overwrite=False) fusiona ambas escrituras en la misma fila.
+    """
+    import numpy as np
+
+    if isinstance(new_row, dict):
+        new_row = pd.DataFrame([new_row])
+    else:
+        new_row = new_row.copy()
+
     existing = read_history_csv()
 
-    # Asegurar consistencia de columnas
     for col in HISTORY_COLUMNS:
-        if col not in new_rows.columns: new_rows[col] = 0
-        if col not in existing.columns: existing[col] = 0
+        if col not in new_row.columns:
+            new_row[col] = np.nan
+        if col not in existing.columns:
+            existing[col] = np.nan
 
-    combined = pd.concat([existing, new_rows[HISTORY_COLUMNS]], ignore_index=True)
-    
-    # Sincronización: El resultado local (TabNet) actualiza el de la nube (XGB)
-    combined = combined.drop_duplicates(
-        subset=["year", "round", "driver_abbr"], keep="last"
-    )
-    
+    key_cols  = ["year", "round"]
+    new_idx   = new_row.set_index(key_cols)
+
+    if existing.empty:
+        combined = new_row[HISTORY_COLUMNS]
+    else:
+        existing_idx = existing.set_index(key_cols)
+        existing_idx.update(new_idx, overwrite=False)
+        new_only = new_idx[~new_idx.index.isin(existing_idx.index)]
+        combined = pd.concat([existing_idx, new_only]).reset_index()
+        combined = combined[[c for c in HISTORY_COLUMNS if c in combined.columns]]
+
     buf = io.StringIO()
     combined.to_csv(buf, index=False)
     _s3_client().put_object(
         Bucket=S3_BUCKET,
         Key=S3_HISTORY_KEY,
         Body=buf.getvalue().encode("utf-8"),
-        ContentType="text/csv"
+        ContentType="text/csv",
     )
-    logger.info(f"✅ Historial sincronizado en s3://{S3_BUCKET}/{S3_HISTORY_KEY}")
+    logger.info("history.csv actualizado en s3://%s/%s", S3_BUCKET, S3_HISTORY_KEY)
 
 # ─── SUBIDA DE ARCHIVOS GENÉRICA ─────────────────────────────────────────────
 
@@ -112,23 +140,28 @@ def download_model_artefacts() -> None:
         local.parent.mkdir(parents=True, exist_ok=True)
         s3.download_file(S3_BUCKET, key, str(local))
 
+
 # ─── ATHENA (MOTOR PARA LOOKER STUDIO) ───────────────────────────────────────
 
 def setup_athena_table() -> None:
-    """Configura la tabla para que Looker Studio 'vea' los datos."""
-    # Nota: Usamos STRING para el timestamp para evitar problemas de formato en Athena
-    ddl = f"""
+    """
+    Crea (o verifica) las dos tablas externas de Athena sobre S3:
+      1. race_predictions   -- un ganador predicho por carrera (XGBoost + TabNet)
+      2. feature_importance -- importancia de cada feature con trained_at
+    """
+    ddl_predictions = f"""
     CREATE EXTERNAL TABLE IF NOT EXISTS {ATHENA_DATABASE}.{ATHENA_TABLE} (
         year INT,
         round INT,
         event_name STRING,
         circuit STRING,
-        driver_abbr STRING,
-        team STRING,
-        grid_position INT,
+        predicted_winner_xgb STRING,
         win_prob_xgboost DOUBLE,
+        predicted_winner_tab STRING,
         win_prob_tabnet DOUBLE,
-        actual_winner INT,
+        actual_winner STRING,
+        xgb_correct INT,
+        tab_correct INT,
         prediction_timestamp STRING
     )
     ROW FORMAT DELIMITED
@@ -136,8 +169,30 @@ def setup_athena_table() -> None:
     LOCATION 's3://{S3_BUCKET}/predictions/'
     TBLPROPERTIES ('skip.header.line.count'='1');
     """
-    _run_athena_query(ddl)
-    logger.info(f"🏛️ Tabla Athena {ATHENA_TABLE} verificada/creada.")
+
+    ddl_importance = f"""
+    CREATE EXTERNAL TABLE IF NOT EXISTS {ATHENA_DATABASE}.{ATHENA_TABLE_IMPORTANCE} (
+        feature STRING,
+        importance_xgboost DOUBLE,
+        importance_tabnet DOUBLE,
+        trained_at STRING
+    )
+    ROW FORMAT DELIMITED
+    FIELDS TERMINATED BY ','
+    LOCATION 's3://{S3_BUCKET}/metrics/'
+    TBLPROPERTIES (
+        'skip.header.line.count'='1',
+        'classification.file.pattern'='feature_importance.csv'
+    );
+    """
+
+    for name, ddl in [
+        (ATHENA_TABLE,            ddl_predictions),
+        (ATHENA_TABLE_IMPORTANCE, ddl_importance),
+    ]:
+        _run_athena_query(ddl)
+        logger.info("Tabla Athena '%s' verificada/creada.", name)
+
 
 def _run_athena_query(query: str):
     client = _get_session().client("athena")
@@ -148,13 +203,36 @@ def _run_athena_query(query: str):
     )
 
 def update_actual_winner(year: int, round_num: int, winner_abbr: str):
-    """Actualiza la columna actual_winner el lunes después de la carrera."""
+    """
+    Registra el ganador real tras la carrera y calcula xgb_correct / tab_correct.
+    Llamar el lunes post-carrera via: python predict.py --round N --record-result
+    """
     df = read_history_csv()
-    mask = (df['year'] == year) & (df['round'] == round_num)
-    
-    if not df[mask].empty:
-        df.loc[mask, 'actual_winner'] = (df.loc[mask, 'driver_abbr'] == winner_abbr).astype(int)
-        append_to_history_csv(df[mask])
-        logger.info(f"🏆 Ganador {winner_abbr} registrado para la ronda {round_num}.")
-    else:
-        logger.warning("⚠️ No se encontraron predicciones para actualizar el ganador.")
+    mask = (df["year"] == year) & (df["round"] == round_num)
+
+    if df[mask].empty:
+        logger.warning("No hay prediccion en S3 para %d R%d.", year, round_num)
+        return
+
+    df.loc[mask, "actual_winner"] = winner_abbr
+    df.loc[mask, "xgb_correct"]   = (
+        df.loc[mask, "predicted_winner_xgb"] == winner_abbr
+    ).astype(int)
+    df.loc[mask, "tab_correct"]   = (
+        df.loc[mask, "predicted_winner_tab"] == winner_abbr
+    ).astype(int)
+
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    _s3_client().put_object(
+        Bucket=S3_BUCKET,
+        Key=S3_HISTORY_KEY,
+        Body=buf.getvalue().encode("utf-8"),
+        ContentType="text/csv",
+    )
+    logger.info(
+        "Ganador real '%s' registrado para %d R%d. XGB correcto: %s | TAB correcto: %s",
+        winner_abbr, year, round_num,
+        bool(df.loc[mask, "xgb_correct"].values[0]),
+        bool(df.loc[mask, "tab_correct"].values[0]),
+    )

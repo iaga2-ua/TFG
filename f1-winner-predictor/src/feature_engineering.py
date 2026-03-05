@@ -41,10 +41,36 @@ def _driver_wet_win_rate(df: pd.DataFrame, window: int = 10) -> pd.Series:
 # ─── METADATA Y STANDINGS ──────────────────────────────────────────────────────
 
 def _attach_circuit_metadata(df: pd.DataFrame) -> pd.DataFrame:
-    """Une las características estáticas del circuito."""
+    """
+    Une la metadata del circuito al DataFrame.
+
+    Si los datos proceden de data_collection (que ya llama a
+    get_circuit_meta_from_fastf1), las columnas dinámicas
+    (track_length_km, corner_count) y estáticas ya existen y no se
+    sobreescriben.  Solo añade las columnas que falten, usando la tabla
+    estática como fallback.
+    """
     df = df.copy()
+    # Columnas que esta función puede aportar
+    meta_cols = [
+        "overtake_difficulty", "drs_zones", "avg_safety_car_prob",
+        "track_length_km", "corner_count",
+    ]
+    missing = [c for c in meta_cols if c not in df.columns]
+    if not missing:
+        return df  # todas las columnas ya vienen de data_collection
+
     meta_df = df["circuit"].apply(lambda x: pd.Series(get_circuit_meta(x)))
-    return pd.concat([df, meta_df], axis=1)
+    # Añadir solo las que faltan (get_circuit_meta no devuelve track_length_km
+    # ni corner_count, así que se rellenan con 0/NaN si no están presentes)
+    for col in missing:
+        if col in meta_df.columns:
+            df[col] = meta_df[col].values
+        elif col in ("track_length_km",):
+            df[col] = float("nan")
+        else:
+            df[col] = 0
+    return df
 
 def _circuit_driver_history(df: pd.DataFrame) -> pd.DataFrame:
     """Estadísticas históricas del piloto en este circuito específico."""

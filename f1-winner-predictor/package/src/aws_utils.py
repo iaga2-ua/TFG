@@ -17,8 +17,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     AWS_REGION, AWS_PROFILE,
-    S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY, S3_RACE_RESULTS_KEY,
-    MODEL_FILE, ENCODER_FILE, RAW_DIR,
+    S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY,
+    MODEL_FILE, ENCODER_FILE,
     ATHENA_DATABASE, ATHENA_TABLE, ATHENA_TABLE_IMPORTANCE,
     ATHENA_OUTPUT_LOC,
 )
@@ -100,11 +100,7 @@ def append_to_history_csv(new_row) -> None:
         combined = new_row[HISTORY_COLUMNS]
     else:
         existing_idx = existing.set_index(key_cols)
-        # Sobrescribir solo celdas no-NaN del new_row: permite correcciones
-        # pero preserva columnas que la otra parte (XGB vs TabNet) ya escribió.
-        for col in new_idx.columns:
-            non_nan = new_idx[col].notna()
-            existing_idx.loc[new_idx.index[non_nan], col] = new_idx.loc[non_nan, col]
+        existing_idx.update(new_idx, overwrite=False)
         new_only = new_idx[~new_idx.index.isin(existing_idx.index)]
         combined = pd.concat([existing_idx, new_only]).reset_index()
         combined = combined[[c for c in HISTORY_COLUMNS if c in combined.columns]]
@@ -132,13 +128,8 @@ def upload_to_s3(local_path: Path, s3_key: str) -> None:
 # ─── MODELOS Y ARTEFACTOS ────────────────────────────────────────────────────
 
 def upload_model_artefacts() -> None:
-    """Sube XGBoost, Encoders y el CSV de resultados históricos de carrera."""
-    artefacts = [
-        (MODEL_FILE, S3_MODEL_KEY),
-        (ENCODER_FILE, S3_ENCODER_KEY),
-        (RAW_DIR / "race_results_raw.csv", S3_RACE_RESULTS_KEY),
-    ]
-    for local, key in artefacts:
+    """Sube XGBoost y Encoders."""
+    for local, key in [(MODEL_FILE, S3_MODEL_KEY), (ENCODER_FILE, S3_ENCODER_KEY)]:
         if local.exists():
             upload_to_s3(local, key)
 
@@ -148,16 +139,6 @@ def download_model_artefacts() -> None:
     for local, key in [(MODEL_FILE, S3_MODEL_KEY), (ENCODER_FILE, S3_ENCODER_KEY)]:
         local.parent.mkdir(parents=True, exist_ok=True)
         s3.download_file(S3_BUCKET, key, str(local))
-
-def download_race_results() -> pd.DataFrame:
-    """Descarga race_results_raw.csv de S3 (usado por Lambda para features históricas)."""
-    s3 = _s3_client()
-    try:
-        obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_RACE_RESULTS_KEY)
-        return pd.read_csv(io.BytesIO(obj["Body"].read()))
-    except Exception as exc:
-        logger.warning("No se pudo descargar race_results_raw.csv: %s", exc)
-        return pd.DataFrame()
 
 
 # ─── ATHENA (MOTOR PARA LOOKER STUDIO) ───────────────────────────────────────
@@ -255,175 +236,3 @@ def update_actual_winner(year: int, round_num: int, winner_abbr: str):
         bool(df.loc[mask, "xgb_correct"].values[0]),
         bool(df.loc[mask, "tab_correct"].values[0]),
     )
-    # Actualizar la gráfica de accuracy en Google Sheets
-    try:
-        sync_to_sheets()
-        sync_model_accuracy_to_sheets()
-    except Exception as exc:
-        logger.warning("No se pudo sincronizar accuracy a Sheets: %s", exc)
-
-# ─── SINCRONIZACIÓN CON GOOGLE SHEETS ────────────────────────────────────────
-
-SHEETS_ID = "1Jw7wo3bqC2IS9MmfSJe6T2waQyp7LTCMv4al7gwhtPI"
-
-def sync_to_sheets(credentials_path: str = None) -> None:
-    """
-    Sincroniza history.csv de S3 con la Google Sheet del TFG.
-
-    credentials_path: ruta al JSON de la service account de Google.
-    Si es None, usa la variable de entorno GOOGLE_APPLICATION_CREDENTIALS
-    o el archivo .google_credentials.json en la raíz del proyecto.
-    """
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    # Resolver credenciales
-    if credentials_path is None:
-        credentials_path = os.environ.get(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            str(Path(__file__).parent.parent / ".google_credentials.json"),
-        )
-
-    if not Path(credentials_path).exists():
-        logger.error(
-            "Credenciales de Google no encontradas en %s. "
-            "Descarga el JSON de la service account y colócalo ahí.",
-            credentials_path,
-        )
-        return
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds  = Credentials.from_service_account_file(credentials_path, scopes=scopes)
-    client = gspread.authorize(creds)
-
-    # Leer datos de S3
-    df = read_history_csv()
-    if df.empty:
-        logger.warning("history.csv vacío — nada que sincronizar.")
-        return
-
-    df = df.fillna("")
-
-    # Escribir en la hoja
-    sheet     = client.open_by_key(SHEETS_ID)
-    worksheet = sheet.get_worksheet(0)
-    worksheet.clear()
-    worksheet.update([df.columns.tolist()] + df.values.tolist())
-
-    logger.info("✅ Google Sheets sincronizado: %d filas.", len(df))
-
-
-def sync_feature_importance_to_sheets(credentials_path: str = None) -> None:
-    """
-    Sincroniza metrics/feature_importance.csv de S3 con la pestaña
-    'feature_importance' de la misma Google Sheet del TFG.
-    """
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    if credentials_path is None:
-        credentials_path = os.environ.get(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            str(Path(__file__).parent.parent / ".google_credentials.json"),
-        )
-
-    if not Path(credentials_path).exists():
-        logger.error(
-            "Credenciales de Google no encontradas en %s.",
-            credentials_path,
-        )
-        return
-
-    # Leer feature_importance.csv de S3
-    s3 = _s3_client()
-    try:
-        obj = s3.get_object(Bucket=S3_BUCKET, Key="metrics/feature_importance.csv")
-        df = pd.read_csv(io.BytesIO(obj["Body"].read()))
-    except s3.exceptions.NoSuchKey:
-        logger.warning("metrics/feature_importance.csv no existe en S3 — entrena primero los modelos.")
-        return
-
-    df = df.fillna("")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds  = Credentials.from_service_account_file(credentials_path, scopes=scopes)
-    client = gspread.authorize(creds)
-
-    sheet = client.open_by_key(SHEETS_ID)
-
-    # Obtener o crear la pestaña 'feature_importance'
-    try:
-        ws = sheet.worksheet("feature_importance")
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sheet.add_worksheet(title="feature_importance", rows=50, cols=10)
-
-    ws.clear()
-    ws.update([df.columns.tolist()] + df.values.tolist())
-
-    logger.info("✅ feature_importance sincronizado a Google Sheets: %d features.", len(df))
-
-
-def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
-    """
-    Sincroniza metrics/historical_performance.csv de S3 con la pestaña
-    'model_accuracy' de la misma Google Sheet del TFG.
-
-    Añade columnas de accuracy acumulada para ver la evolución por carrera.
-    """
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    if credentials_path is None:
-        credentials_path = os.environ.get(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            str(Path(__file__).parent.parent / ".google_credentials.json"),
-        )
-
-    if not Path(credentials_path).exists():
-        logger.error(
-            "Credenciales de Google no encontradas en %s.",
-            credentials_path,
-        )
-        return
-
-    # Leer predictions/history.csv — predicciones reales de 2026
-    df = read_history_csv()
-    if df.empty:
-        logger.warning("history.csv vacío — aún no hay predicciones de 2026.")
-        return
-
-    # Ordenar cronológicamente y calcular accuracy acumulada solo sobre carreras ya disputadas
-    df = df.sort_values(["year", "round"]).reset_index(drop=True)
-    df["race_label"] = df["event_name"].fillna(df["year"].astype(str) + " R" + df["round"].astype(str))
-    df["xgb_correct"] = pd.to_numeric(df["xgb_correct"], errors="coerce")
-    df["tab_correct"] = pd.to_numeric(df["tab_correct"], errors="coerce")
-    valid = df["xgb_correct"].notna()
-    df.loc[valid, "xgb_accuracy_cumul"] = df.loc[valid, "xgb_correct"].expanding().mean().round(4)
-    df.loc[valid, "tab_accuracy_cumul"] = df.loc[valid, "tab_correct"].expanding().mean().round(4)
-
-    df = df.fillna("")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds  = Credentials.from_service_account_file(credentials_path, scopes=scopes)
-    client = gspread.authorize(creds)
-
-    sheet = client.open_by_key(SHEETS_ID)
-
-    try:
-        ws = sheet.worksheet("model_accuracy")
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sheet.add_worksheet(title="model_accuracy", rows=200, cols=15)
-
-    ws.clear()
-    ws.update([df.columns.tolist()] + df.values.tolist())
-
-    logger.info("✅ model_accuracy sincronizado a Google Sheets: %d carreras.", len(df))

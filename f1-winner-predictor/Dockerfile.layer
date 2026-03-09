@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+# Herramientas de compilación mínimas
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+
+# Actualizar pip para que encuentre los wheels más recientes
+RUN pip install --upgrade pip --quiet
+
+# Copiar solo el requirements de Lambda
+COPY requirements-lambda.txt .
+
+# Instalar en la ruta estándar de una Lambda Layer
+RUN pip install -r requirements-lambda.txt -t /layer/python/ --no-cache-dir
+
+# El contenedor solo existe para copiar la carpeta /layer/
+CMD ["ls", "/layer/python/"]

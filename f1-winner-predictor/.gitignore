@@ -14,14 +14,14 @@ build/
 venv/
 env/
 
-# Data (large files — keep only source code in git)
+# Data
 data/raw/
 data/processed/
 
 # Model artefacts (tracked via S3)
 models/*.pkl
 
-# FastF1 cache (can be large)
+# FastF1 cache
 .fastf1_cache/
 
 # IDE / OS
@@ -33,10 +33,22 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# AWS credentials (NEVER commit these)
+# AWS credentials 
 .aws/
 *.pem
 *.key
 
-# Google credentials (NEVER commit these)
+# Lambda build artefacts
+lambda.zip
+package/
+*.zip
+
+# Model binaries (tracked via S3)
+models/*.zip
+
+# Local test responses
+response.json
+
+# Google credentials 
 .google_credentials.json
+

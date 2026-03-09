@@ -30,7 +30,8 @@ data_collection.py  ──►  feature_engineering.py
           ┌──────────┴──────────┐
           ▼                     ▼
     Google Sheets           Athena
-    (Looker Studio)     (consultas SQL)
+    (Looker Studio       (disponible para
+     — fuente activa)    consultas SQL ad-hoc)
 ```
 
 ---
@@ -51,7 +52,7 @@ f1-winner-predictor/
 │   ├── __init__.py
 │   ├── data_collection.py     # Descarga datos de FastF1 (quali, carrera, meteorología)
 │   ├── feature_engineering.py # Construcción de features para XGBoost y TabNet
-│   ├── aws_utils.py           # S3, Athena, Google Sheets sync
+│   ├── aws_utils.py           # S3, Google Sheets sync (Athena configurado para SQL ad-hoc)
 │   ├── predict_lambda.py      # Handler de AWS Lambda (inferencia XGBoost)
 │   └── circuit_metadata.py    # Tabla estática de metadatos de circuitos
 └── models/                    # Artefactos locales (gitignored, gestionados vía S3)
@@ -115,7 +116,7 @@ f1-winner-predictor/
 | **S3 bucket** | `f1-winner-predictor-2026` |
 | **Lambda** | `f1-winner-predictor` (imagen ECR) |
 | **ECR** | `606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest` |
-| **Athena** | DB: `f1_predictions`, tablas: `race_predictions`, `feature_importance` |
+| **Athena** | DB: `f1_predictions`, tablas: `race_predictions`, `feature_importance` — configurado para consultas SQL ad-hoc; Looker Studio usa Google Sheets como fuente activa |
 
 ### Estructura del bucket S3
 

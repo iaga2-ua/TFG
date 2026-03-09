@@ -9,23 +9,18 @@ from pathlib import Path
 
 # ─── PATHS ───────────────────────────────────────────────────────────────────
 PROJECT_ROOT   = Path(__file__).parent
-
-# En Lambda /var/task es de sólo lectura; usamos /tmp para datos y caché
-_IS_LAMBDA     = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
-_WRITABLE_ROOT = Path("/tmp") if _IS_LAMBDA else PROJECT_ROOT
-
-DATA_DIR       = _WRITABLE_ROOT / "data"
+DATA_DIR       = PROJECT_ROOT / "data"
 RAW_DIR        = DATA_DIR / "raw"
 PROCESSED_DIR  = DATA_DIR / "processed"
-MODELS_DIR     = _WRITABLE_ROOT / "models"
-CACHE_DIR      = _WRITABLE_ROOT / ".fastf1_cache"
+MODELS_DIR     = PROJECT_ROOT / "models"
+CACHE_DIR      = PROJECT_ROOT / ".fastf1_cache"
 
 for _dir in [RAW_DIR, PROCESSED_DIR, MODELS_DIR, CACHE_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)
 
 # ─── SEASONS ─────────────────────────────────────────────────────────────────
 # Recomendación: Incluir 2023 si tienes los datos para dar más volumen a TabNet
-TRAIN_SEASONS   = [2023, 2024, 2025, 2026]   # 2026: solo carreras ya disputadas
+TRAIN_SEASONS   = [2023, 2024, 2025] 
 CURRENT_SEASON  = 2026
 
 # ─── FASTF1 ──────────────────────────────────────────────────────────────────
@@ -87,12 +82,11 @@ S3_BUCKET      = os.environ.get("S3_BUCKET", "f1-winner-predictor-2026")
 LAMBDA_FUNCTION_NAME = os.environ.get("LAMBDA_FUNCTION_NAME", "f1-winner-predictor")
 
 # ─── S3 KEYS ────────────────────────────────────────────────────────────────────
-S3_HISTORY_KEY     = "predictions/history.csv"       # historial unificado (input de Athena)
-S3_MODEL_KEY       = "models/xgboost_f1_winner.pkl"  # artefacto XGBoost para Lambda
-S3_ENCODER_KEY     = "models/label_encoders.pkl"     # encoders compartidos con Lambda
+S3_HISTORY_KEY     = "predictions/history.csv"     # historial unificado (input de Athena)
+S3_MODEL_KEY       = "models/xgboost_f1_winner.pkl" # artefacto XGBoost para Lambda
+S3_ENCODER_KEY     = "models/label_encoders.pkl"    # encoders compartidos con Lambda
 S3_IMPORTANCE_KEY  = "metrics/feature_importance.csv"
 S3_PERFORMANCE_KEY = "metrics/historical_performance.csv"
-S3_RACE_RESULTS_KEY = "data/race_results_raw.csv"    # resultados históricos de carrera (features for Lambda)
 
 # ─── ATHENA (motor SQL sobre S3 → Looker Studio) ──────────────────────────────────
 ATHENA_DATABASE          = os.environ.get("ATHENA_DATABASE",          "f1_predictions")

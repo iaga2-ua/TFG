@@ -1,7 +1,7 @@
 # Datos y API
 fastf1>=3.4.0
 pandas>=2.0.0
-numpy<2.0.0
+numpy>=1.24.0
 requests
 
 # Machine Learning
@@ -9,6 +9,7 @@ xgboost>=2.0.0
 pytorch-tabnet>=4.1.0
 torch>=2.0.0
 scikit-learn>=1.3.0
+optuna>=3.6.0
 
 # AWS y Nube
 boto3
@@ -17,3 +18,7 @@ s3fs
 # Utilidades
 python-dateutil
 tqdm
+
+# Google Sheets
+gspread>=6.0.0
+google-auth>=2.0.0

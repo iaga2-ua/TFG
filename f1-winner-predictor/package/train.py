@@ -57,13 +57,13 @@ logger = logging.getLogger(__name__)
 
 # ─── Carga de datos ───────────────────────────────────────────────────────────
 
-def load_or_fetch_raw(refresh: bool = False) -> pd.DataFrame:
-    """Carga el CSV histórico local; si no existe o se pide refresh, lo descarga de FastF1."""
+def load_or_fetch_raw() -> pd.DataFrame:
+    """Carga el CSV histórico local; si no existe, lo descarga de FastF1."""
     raw_path = RAW_DIR / "race_results_raw.csv"
-    if raw_path.exists() and not refresh:
+    if raw_path.exists():
         logger.info(f"📂 Cargando datos crudos desde {raw_path}")
         return pd.read_csv(raw_path)
-    logger.info("📡 Descargando datos de FastF1 (temporadas %s)...", TRAIN_SEASONS)
+    logger.info("📡 Datos locales no encontrados — descargando de FastF1...")
     return collect_all_seasons(seasons=TRAIN_SEASONS, save=True)
 
 
@@ -142,10 +142,10 @@ def optimize_tabnet(X_scaled: np.ndarray, y: np.ndarray, n_trials: int) -> dict:
 
 # ─── Entrenamiento ────────────────────────────────────────────────────────────
 
-def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n_trials: int = OPTUNA_N_TRIALS, refresh_data: bool = False) -> None:
+def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n_trials: int = OPTUNA_N_TRIALS) -> None:
     # 1. Datos y features (siempre los mismos para ambos modelos)
-    df_raw = load_or_fetch_raw(refresh=refresh_data)
-    X, y, encoders, _ctx = build_features(df_raw)
+    df_raw = load_or_fetch_raw()
+    X, y, encoders = build_features(df_raw)
 
     xgb_model = None
     tab_model  = None
@@ -240,9 +240,9 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
     if xgb_model is not None and tab_model is not None:
         # Agregar a nivel de carrera: ganador predicho vs real
         tmp = pd.DataFrame({
-            "driver":        _ctx["driver_abbr"].values,
-            "season":        _ctx["year"].values,
-            "round":         _ctx["round"].values,
+            "driver":        df_raw.loc[X.index, "driver_abbr"].values,
+            "season":        df_raw.loc[X.index, "year"].values,
+            "round":         df_raw.loc[X.index, "round"].values,
             "actual_winner": y.values,
             "prob_xgboost":  xgb_model.predict_proba(X)[:, 1],
             "prob_tabnet":   tab_model.predict_proba(X_scaled)[:, 1],
@@ -284,11 +284,10 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
             logger.warning("⚠️  --upload-s3 ignorado: XGBoost no fue entrenado en esta ejecución.")
         else:
             try:
-                from src.aws_utils import upload_model_artefacts, upload_to_s3, sync_feature_importance_to_sheets
+                from src.aws_utils import upload_model_artefacts, upload_to_s3
                 upload_model_artefacts()   # sube MODEL_FILE + ENCODER_FILE
                 if not importance_df.empty:
                     upload_to_s3(feat_path,  "metrics/feature_importance.csv")
-                    sync_feature_importance_to_sheets()
                 if xgb_model is not None and tab_model is not None:
                     upload_to_s3(comp_path, "metrics/historical_performance.csv")
                 logger.info("🚀 Artefactos XGBoost subidos a S3 → listos para Lambda.")
@@ -318,11 +317,6 @@ if __name__ == "__main__":
         help="Optimiza hiperparámetros con Optuna antes de entrenar (incrementa el tiempo).",
     )
     parser.add_argument(
-        "--refresh-data",
-        action="store_true",
-        help="Fuerza la descarga de datos actualizados de FastF1 (incluye 2026).",
-    )
-    parser.add_argument(
         "--n-trials",
         type=int,
         default=OPTUNA_N_TRIALS,
@@ -330,5 +324,4 @@ if __name__ == "__main__":
         help=f"Número de trials de Optuna (por defecto: {OPTUNA_N_TRIALS}).",
     )
     args = parser.parse_args()
-    train(upload_s3=args.upload_s3, model=args.model, optimize=args.optimize,
-          n_trials=args.n_trials, refresh_data=args.refresh_data)
+    train(upload_s3=args.upload_s3, model=args.model, optimize=args.optimize, n_trials=args.n_trials)

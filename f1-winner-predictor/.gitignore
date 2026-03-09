@@ -37,3 +37,6 @@ Thumbs.db
 .aws/
 *.pem
 *.key
+
+# Google credentials (NEVER commit these)
+.google_credentials.json

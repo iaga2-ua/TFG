@@ -54,13 +54,12 @@ logger = logging.getLogger(__name__)
 
 def load_tabnet():
     """Carga TabNet, Scaler y los encoders de etiquetas (generados durante el entrenamiento)."""
-    tabnet_zip = TABNET_MODEL_PATH.with_suffix(".zip")
-    if not (TABNET_MODEL_PATH.exists() or tabnet_zip.exists()) or not SCALER_FILE.exists():
+    if not TABNET_MODEL_PATH.exists() or not SCALER_FILE.exists():
         logger.warning("TabNet o Scaler no encontrados en /models. Ejecuta train.py primero.")
         return None, None, {}
     from pytorch_tabnet.tab_model import TabNetClassifier
     tab = TabNetClassifier()
-    tab.load_model(str(TABNET_MODEL_PATH) + ".zip")
+    tab.load_model(str(TABNET_MODEL_PATH))
     with open(SCALER_FILE, "rb") as f:
         scaler = pickle.load(f)
     # Los encoders (circuit_encoded, constructor_encoded) son los mismos para
@@ -116,7 +115,7 @@ def predict_race(
         )
 
     history_df = load_history()
-    X          = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
+    X          = apply_features(df_live, encoders, history_df=history_df)
     X_scaled   = scaler.transform(X)
     probs_tab  = tab_model.predict_proba(X_scaled)[:, 1]
 
@@ -141,11 +140,10 @@ def predict_race(
 
     if upload:
         try:
-            from src.aws_utils import append_to_history_csv, sync_to_sheets
+            from src.aws_utils import append_to_history_csv
             append_to_history_csv(result_row)
             logger.info("Ganador TabNet guardado en S3: %s (%.1f%%)",
                         winner_abbr, winner_prob * 100)
-            sync_to_sheets()
         except Exception as exc:
             logger.error("Error al subir a S3: %s", exc)
             local_out = RAW_DIR / f"prediction_{year}_R{round_num:02d}.json"

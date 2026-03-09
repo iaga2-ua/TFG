@@ -116,7 +116,6 @@ f1-winner-predictor/
 | **Lambda** | `f1-winner-predictor` (imagen ECR) |
 | **ECR** | `606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest` |
 | **Athena** | DB: `f1_predictions`, tablas: `race_predictions`, `feature_importance` |
-| **EventBridge** | Regla `f1-quali-saturday`: trigger automático cada sábado a las 18:00 UTC |
 
 ### Estructura del bucket S3
 
@@ -215,8 +214,7 @@ Al terminar se actualizan automáticamente:
 
 ### Después de la clasificación (sábado) — Predecir
 
-**XGBoost vía Lambda** (automático por EventBridge a las 18:00 UTC).
-También se puede invocar manualmente:
+**XGBoost vía Lambda** (invocar manualmente tras la clasificación):
 
 ```powershell
 aws lambda invoke --function-name f1-winner-predictor `

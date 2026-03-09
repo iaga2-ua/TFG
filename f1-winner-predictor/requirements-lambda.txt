@@ -1,0 +1,16 @@
+# Dependencias mínimas para la función Lambda (solo XGBoost, sin torch/TabNet)
+gspread>=6.0.0
+google-auth>=2.0.0
+fastf1>=3.4.0
+pandas>=2.0.0
+numpy>=2.0.0
+requests
+xgboost>=2.0.0,<3.0.0
+scikit-learn>=1.3.0
+boto3
+s3fs
+python-dateutil
+tqdm
+# Fijar matplotlib a versión con wheels manylinux para Amazon Linux 2
+matplotlib>=3.7.0
+contourpy>=1.0.0

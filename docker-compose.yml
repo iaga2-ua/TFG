@@ -1,24 +1,32 @@
 version: '3.8'
 
 services:
-  f1-predictor:
+  # ── Inferencia TabNet (post-clasificación, sábado) ──────────────────────────
+  # Uso: docker compose run tabnet-predictor python predict.py --round N --no-upload
+  tabnet-predictor:
     build: .
-    image: f1-predictor:latest
+    image: f1-tabnet:latest
     env_file:
-      - .env  # Aquí guardaremos tus llaves de AWS de forma segura
+      - .env
     volumes:
-      - ./data:/app/data        # Sincroniza datos crudos y procesados
-      - ./models:/app/models    # Sincroniza tus .pkl y .zip entrenados
-      - ./.fastf1_cache:/app/.fastf1_cache # Evita re-descargar datos de la API
-    # Por defecto no hace nada, tú le pasas el comando al arrancar
-    stdin_open: true
-    tty: true
+      - ./f1-winner-predictor/models:/app/models          # modelos .zip y scaler
+      - ./f1-winner-predictor/data:/app/data              # datos crudos y procesados
+      - ./f1-winner-predictor/.fastf1_cache:/app/.fastf1_cache  # caché FastF1
+      - ./f1-winner-predictor/.google_credentials.json:/app/.google_credentials.json:ro
+    command: python predict.py --help
 
-  # Opcional: Un servicio específico para el entrenamiento
+  # ── Entrenamiento (XGBoost + TabNet) ────────────────────────────────────────
+  # Uso: docker compose run trainer
+  # Añadir --upload-s3 para subir los artefactos XGBoost a S3
+  # Añadir --optimize [--n-trials N] para buscar HPs óptimos con Optuna antes de entrenar
   trainer:
     build: .
+    image: f1-tabnet:latest
     env_file:
-      - .env  # Aquí guardaremos tus llaves de AWS de forma segura
+      - .env
     volumes:
-      - .:/app
-    command: python train.py --upload-s3
+      - ./f1-winner-predictor/models:/app/models
+      - ./f1-winner-predictor/data:/app/data
+      - ./f1-winner-predictor/.fastf1_cache:/app/.fastf1_cache
+      - ./f1-winner-predictor/.google_credentials.json:/app/.google_credentials.json:ro
+    command: python train.py

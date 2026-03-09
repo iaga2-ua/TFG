@@ -29,49 +29,42 @@ from src.data_collection import fetch_qualifying_snapshot
 from src.feature_engineering import apply_features
 from src.aws_utils import (
     append_to_history_csv,
-    download_race_results,
-    sync_to_sheets,
+    download_model_artefacts,
+    read_history_csv,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Cache warm-start
-_XGB_MODEL    = None
-_ENCODERS     = None
-_RACE_RESULTS = None  # race_results_raw.csv descargado de S3
+_XGB_MODEL = None
+_ENCODERS  = None
 
 def _load_models():
-    """Descarga modelos desde S3 a /tmp y los carga."""
+    """Descarga y carga modelos usando /tmp como puente."""
     global _XGB_MODEL, _ENCODERS
     if _XGB_MODEL is not None:
         return _XGB_MODEL, _ENCODERS
 
-    import boto3
-    from config import S3_BUCKET, S3_MODEL_KEY, S3_ENCODER_KEY, AWS_REGION
+    tmp = Path("/tmp")
+    model_tmp = tmp / "xgboost_f1_winner.pkl"
+    encoder_tmp = tmp / "label_encoders.pkl"
 
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    model_tmp   = Path("/tmp/xgboost_f1_winner.pkl")
-    encoder_tmp = Path("/tmp/label_encoders.pkl")
+    # Redirección temporal de rutas de config para usar download_model_artefacts
+    import config as cfg
+    old_m, old_e = cfg.MODEL_FILE, cfg.ENCODER_FILE
+    cfg.MODEL_FILE, cfg.ENCODER_FILE = model_tmp, encoder_tmp
+    
+    try:
+        download_model_artefacts()
+        with open(model_tmp, "rb") as f: _XGB_MODEL = pickle.load(f)
+        with open(encoder_tmp, "rb") as f: _ENCODERS = pickle.load(f)
+        logger.info("✅ Modelos cargados exitosamente en Lambda.")
+    finally:
+        # Restaurar rutas originales
+        cfg.MODEL_FILE, cfg.ENCODER_FILE = old_m, old_e
 
-    logger.info("Descargando modelos desde s3://%s ...", S3_BUCKET)
-    s3.download_file(S3_BUCKET, S3_MODEL_KEY,   str(model_tmp))
-    s3.download_file(S3_BUCKET, S3_ENCODER_KEY, str(encoder_tmp))
-
-    with open(model_tmp,   "rb") as f: _XGB_MODEL = pickle.load(f)
-    with open(encoder_tmp, "rb") as f: _ENCODERS  = pickle.load(f)
-    logger.info("✅ Modelos cargados exitosamente en Lambda.")
     return _XGB_MODEL, _ENCODERS
-
-def _load_race_results() -> pd.DataFrame:
-    """Descarga race_results_raw.csv de S3 (warm-cached por invocación)."""
-    global _RACE_RESULTS
-    if _RACE_RESULTS is not None:
-        return _RACE_RESULTS
-    logger.info("Descargando resultados históricos de carrera desde S3...")
-    _RACE_RESULTS = download_race_results()
-    logger.info("  -> %d filas cargadas.", len(_RACE_RESULTS))
-    return _RACE_RESULTS
 
 def predict(year: int, round_num: int, upload: bool = True) -> dict:
     logger.info("Iniciando prediccion XGBoost: %d Ronda %d", year, round_num)
@@ -82,10 +75,13 @@ def predict(year: int, round_num: int, upload: bool = True) -> dict:
 
     xgb_model, encoders = _load_models()
 
-    # Resultados históricos de carrera: base para calcular standings, rolling stats, etc.
-    race_results_df = _load_race_results()
+    try:
+        history_df = read_history_csv()
+    except Exception as exc:
+        logger.warning("Sin historial en S3, usando DF vacio: %s", exc)
+        history_df = pd.DataFrame()
 
-    X     = apply_features(df_live, encoders, history_df=race_results_df, year=year, round_num=round_num)
+    X     = apply_features(df_live, encoders, history_df=history_df)
     probs = xgb_model.predict_proba(X)[:, 1]
 
     best_idx    = int(np.argmax(probs))
@@ -108,7 +104,6 @@ def predict(year: int, round_num: int, upload: bool = True) -> dict:
         append_to_history_csv(result_row)
         logger.info("Resultado XGBoost guardado en S3: %s (%.1f%%)",
                     winner_abbr, winner_prob * 100)
-        sync_to_sheets()
 
     return {
         "statusCode": 200,

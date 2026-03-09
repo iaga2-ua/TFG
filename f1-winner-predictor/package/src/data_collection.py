@@ -228,14 +228,9 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                 "race_position":   row.get("Position"),
                 "points":          row.get("Points", 0),
                 "status":          row.get("Status"),
-                # Best quali time: mínimo entre Q1, Q2, Q3 (mejor vuelta de toda la qualy)
-                "best_quali_time": min(
-                    (t for t in (
-                        _safe_timedelta_s(row.get("Q3Time")),
-                        _safe_timedelta_s(row.get("Q2Time")),
-                        _safe_timedelta_s(row.get("Q1Time")),
-                    ) if not np.isnan(t)),
-                    default=float("nan"),
+                # Best quali time in seconds (try Q3 → Q2 → Q1)
+                "best_quali_time": _safe_timedelta_s(
+                    row.get("Q3Time") or row.get("Q2Time") or row.get("Q1Time")
                 ),
                 # Weather
                 **weather,
@@ -335,15 +330,9 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
     results["event_name"] = event_name
     results["circuit"]    = circuit
 
-    # Mejor vuelta de cada piloto en TODA la qualy (min de Q1, Q2, Q3).
-    # Más preciso que solo Q3: si un piloto fue eliminado en Q1, usamos
-    # su mejor tiempo real, no NaN.
-    def _best_across_sessions(row):
-        times = [_safe_timedelta_s(row.get(q)) for q in ("Q1", "Q2", "Q3")]
-        valid = [t for t in times if not np.isnan(t)]
-        return min(valid) if valid else float("nan")
-
-    results["best_quali_time"] = results.apply(_best_across_sessions, axis=1)
+    results["best_quali_time"] = results.apply(
+        lambda r: _safe_timedelta_s(r.get("Q3") or r.get("Q2") or r.get("Q1")), axis=1
+    )
     pole_time = results["best_quali_time"].min()
     results["quali_gap_to_pole_s"] = results["best_quali_time"] - pole_time
 
@@ -352,8 +341,7 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         "Abbreviation": "driver_abbr",
         "FullName":     "full_name",
         "TeamName":     "team",
-        "GridPosition": "race_grid_position",  # posición tras penalizaciones (domingo)
-        "Position":     "grid_position",        # posición de clasificación (sábado)
+        "GridPosition": "grid_position",
     }, inplace=True)
 
     # ── Weather ───────────────────────────────────────────────────────────────
@@ -409,20 +397,7 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         "track_length_km", "corner_count",
         "overtake_difficulty", "drs_zones", "avg_safety_car_prob",
     ]
-    df = results[[c for c in keep_cols if c in results.columns]].copy()
-
-    # Validar que la clasificación realmente ocurrió:
-    # si grid_position es todo NaN, FastF1 devuelve la entry list pero la
-    # sesión aún no se ha disputado → no hay datos reales de quali.
-    if df["grid_position"].isna().all():
-        logger.warning(
-            "⚠️  %d R%d (%s): grid_position es todo NaN — "
-            "la clasificación aún no se ha disputado o los datos no están disponibles.",
-            year, round_num, event_name,
-        )
-        return pd.DataFrame()
-
-    return df
+    return results[[c for c in keep_cols if c in results.columns]]
 
 
 def fetch_live_data_2026(year: int, round_num: int) -> pd.DataFrame:

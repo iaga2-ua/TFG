@@ -81,12 +81,9 @@ def _circuit_driver_history(df: pd.DataFrame) -> pd.DataFrame:
         hist = df[(df["year"] < year) | ((df["year"] == year) & (df["round"] < rnd))]
         
         if hist.empty:
-            empty_df = grp[["driver_abbr"]].copy()
-            empty_df["driver_best_finish_circuit"] = np.nan
-            empty_df["driver_avg_finish_circuit"]  = np.nan
-            empty_df["year"]  = year
-            empty_df["round"] = rnd
-            results.append(empty_df)
+            for abbr in grp["driver_abbr"]:
+                results.append({"year": year, "round": rnd, "driver_abbr": abbr,
+                               "driver_best_finish_circuit": np.nan, "driver_avg_finish_circuit": np.nan})
             continue
 
         circuit_val = grp["circuit"].iloc[0]
@@ -183,140 +180,40 @@ def build_features(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, dict]
     }
     df = apply_label_encoders(df, encoders)
 
-    # race_number es simplemente el número de ronda en la temporada
-    df["race_number"] = df["round"]
-
     from config import FEATURE_COLS, TARGET_COL
-    X = df[FEATURE_COLS].fillna(0).reset_index(drop=True)
-    y = df[TARGET_COL].reset_index(drop=True)
-    ctx = df[["driver_abbr", "year", "round"]].reset_index(drop=True)
+    X = df[FEATURE_COLS].fillna(0)
+    y = df[TARGET_COL]
+    
+    return X, y, encoders
 
-    return X, y, encoders, ctx
-
-def apply_features(
-    df_live: pd.DataFrame,
-    encoders: dict,
-    history_df: pd.DataFrame = None,
-    year: int = None,
-    round_num: int = None,
-) -> pd.DataFrame:
-    """Pipeline para INFERENCIA (Sábado de Quali).
-
-    history_df debe ser race_results_raw.csv (descargado de S3).
-    year / round_num delimitan qué datos históricos son válidos
-    (sólo carreras ANTERIORES a la que se está prediciendo).
-    """
+def apply_features(df_live: pd.DataFrame, encoders: dict, history_df: pd.DataFrame = None) -> pd.DataFrame:
+    """Pipeline para INFERENCIA (Sábado de Quali)."""
     from config import FEATURE_COLS
     df = df_live.copy()
-
+    
     # Inyectar metadata estática
     df = _attach_circuit_metadata(df)
-
-    if history_df is not None and not history_df.empty and "driver_abbr" in history_df.columns:
-        df = _enrich_live_from_history(df, history_df, year=year, round_num=round_num)
+    
+    if history_df is not None:
+        # Aquí calculamos los valores finales del historial basándonos en history_df
+        # para que el modelo sepa cómo viene cada piloto a esta carrera.
+        # (Lógica simplificada para brevedad, similar a build_features)
+        df = _enrich_live_from_history(df, history_df)
 
     df = apply_label_encoders(df, encoders)
-
+    
     # Asegurar que todas las columnas existen
     for col in FEATURE_COLS:
-        if col not in df.columns:
-            df[col] = 0
-
+        if col not in df.columns: df[col] = 0
+        
     return df[FEATURE_COLS].fillna(0)
 
-
-def _enrich_live_from_history(
-    df: pd.DataFrame,
-    hist: pd.DataFrame,
-    year: int = None,
-    round_num: int = None,
-) -> pd.DataFrame:
-    """Calcula features históricas usando race_results_raw para cada piloto.
-
-    Solo usa carreras anteriores a (year, round_num) para evitar data leakage.
-    Si year/round_num son None, usa todo el historial.
-    """
-    df = df.copy()
-    hist = hist.copy()
-    hist["race_position"] = pd.to_numeric(hist["race_position"], errors="coerce")
-    if "is_winner" not in hist.columns:
-        hist["is_winner"] = (hist["race_position"] == 1).astype(int)
-
-    # Filtrar: solo datos anteriores a la carrera que se predice
-    if year is not None and round_num is not None:
-        past = hist[
-            (hist["year"] < year) |
-            ((hist["year"] == year) & (hist["round"] < round_num))
-        ].sort_values(["year", "round"])
-    else:
-        past = hist.sort_values(["year", "round"])
-
-    circuit_val = df["circuit"].iloc[0] if "circuit" in df.columns else None
-
+def _enrich_live_from_history(df, hist):
+    """Auxiliar para rellenar datos de historial en tiempo real."""
+    # Ejemplo para driver_avg_finish_l3
     for abbr in df["driver_abbr"].unique():
-        drv = past[past["driver_abbr"] == abbr]
-
-        # Rolling features
-        df.loc[df["driver_abbr"] == abbr, "driver_avg_finish_l3"] = (
-            drv["race_position"].tail(3).mean() if not drv.empty else np.nan
-        )
-        df.loc[df["driver_abbr"] == abbr, "driver_win_rate_l5"] = (
-            drv["is_winner"].tail(5).mean() if not drv.empty else 0.0
-        )
-        wet_drv = drv[drv.get("is_wet_qualifying", pd.Series(0, index=drv.index)).fillna(0).astype(bool)]
-        df.loc[df["driver_abbr"] == abbr, "driver_wet_win_rate"] = (
-            wet_drv["is_winner"].tail(10).mean() if not wet_drv.empty else 0.0
-        )
-
-        # Circuit-specific history
-        if circuit_val is not None:
-            circ_drv = drv[drv["circuit"] == circuit_val]
-            df.loc[df["driver_abbr"] == abbr, "driver_best_finish_circuit"] = (
-                circ_drv["race_position"].min() if not circ_drv.empty else np.nan
-            )
-            df.loc[df["driver_abbr"] == abbr, "driver_avg_finish_circuit"] = (
-                circ_drv["race_position"].mean() if not circ_drv.empty else np.nan
-            )
-
-    # Championship standings (sólo carreras del año actual hasta la ronda anterior)
-    if year is not None and round_num is not None:
-        season_past = past[past["year"] == year]
-    else:
-        season_past = past
-
-    if not season_past.empty:
-        d_pts = (
-            season_past.groupby("driver_abbr")["points"].sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        d_pts["driver_champ_pos"] = range(1, len(d_pts) + 1)
-
-        teams = season_past[["driver_abbr", "team"]].drop_duplicates("driver_abbr")
-        c_pts = (
-            season_past.groupby("team")["points"].sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        c_pts["constructor_champ_pos"] = range(1, len(c_pts) + 1)
-
-        for abbr in df["driver_abbr"].unique():
-            row_d = d_pts[d_pts["driver_abbr"] == abbr]
-            df.loc[df["driver_abbr"] == abbr, "driver_champ_points"] = (
-                row_d["points"].values[0] if not row_d.empty else 0.0
-            )
-            df.loc[df["driver_abbr"] == abbr, "driver_champ_pos"] = (
-                row_d["driver_champ_pos"].values[0] if not row_d.empty else 20
-            )
-            team_row = teams[teams["driver_abbr"] == abbr]
-            if not team_row.empty:
-                team_name = team_row["team"].values[0]
-                row_c = c_pts[c_pts["team"] == team_name]
-                df.loc[df["driver_abbr"] == abbr, "constructor_champ_points"] = (
-                    row_c["points"].values[0] if not row_c.empty else 0.0
-                )
-                df.loc[df["driver_abbr"] == abbr, "constructor_champ_pos"] = (
-                    row_c["constructor_champ_pos"].values[0] if not row_c.empty else 11
-                )
-
+        driver_hist = hist[hist["driver_abbr"] == abbr].sort_values(["year", "round"])
+        if not driver_hist.empty:
+            df.loc[df["driver_abbr"] == abbr, "driver_avg_finish_l3"] = driver_hist["race_position"].tail(3).mean()
+            df.loc[df["driver_abbr"] == abbr, "driver_win_rate_l5"] = driver_hist["is_winner"].tail(5).mean()
     return df

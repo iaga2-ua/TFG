@@ -164,20 +164,42 @@ if ($Mode -eq "predict") {
         Write-Host ($xgbResult | ConvertTo-Json -Depth 5)
         exit 1
     }
-    $body = $xgbResult.body
-    Write-Host ""
-    Write-Host "  XGBoost -> ganador: $($body.predicted_winner)  ($($body.win_probability))" -ForegroundColor Yellow
+    $body       = $xgbResult.body
+    $xgbWinner  = $body.predicted_winner
+    $xgbProb    = $body.win_probability
 
     # -- TabNet via Docker ----------------------------------------------------
     Write-Step "Prediccion TabNet (local) -- $Year Round $Round"
 
+    $tabOutputFile = Join-Path $env:TEMP "f1_tabnet_${Year}_${Round}.txt"
     Push-Location $ProjectDir
     docker compose run --rm `
         -v "${ScriptDir}/predict.py:/app/predict.py" `
         -v "${ScriptDir}/src/predict_lambda.py:/app/src/predict_lambda.py" `
-        trainer python predict.py --round $Round --year $Year
-    Assert-ExitCode "TabNet predict"
+        trainer python predict.py --round $Round --year $Year | Tee-Object -FilePath $tabOutputFile
+    $LASTEXITCODE_TAB = $LASTEXITCODE
     Pop-Location
+    if ($LASTEXITCODE_TAB -ne 0) {
+        Write-Host "[ERROR] TabNet predict fallo (exit $LASTEXITCODE_TAB)" -ForegroundColor Red
+        exit $LASTEXITCODE_TAB
+    }
+
+    $tabLines = Get-Content $tabOutputFile -ErrorAction SilentlyContinue
+    $tabWinner = "N/A"
+    $tabProb   = "N/A"
+    $winLine  = $tabLines | Where-Object { $_ -match "Ganador predicho:" } | Select-Object -Last 1
+    $probLine = $tabLines | Where-Object { $_ -match "Probabilidad:" }     | Select-Object -Last 1
+    if ($winLine  -match "Ganador predicho:\s+(\S+)") { $tabWinner = $Matches[1] }
+    if ($probLine -match "Probabilidad:\s+([\d.]+%)") { $tabProb   = $Matches[1] }
+
+    # -- Resumen final --------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host "  RESUMEN -- GP $Year  Round $Round" -ForegroundColor Cyan
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host "  XGBoost  ->  $xgbWinner   ($xgbProb)" -ForegroundColor Yellow
+    Write-Host "  TabNet   ->  $tabWinner   ($tabProb)" -ForegroundColor Magenta
+    Write-Host "================================================" -ForegroundColor Cyan
 }
 
 Write-Host ""

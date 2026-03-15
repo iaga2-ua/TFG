@@ -30,6 +30,7 @@ import optuna
 import pandas as pd
 import torch
 from pytorch_tabnet.tab_model import TabNetClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -158,9 +159,14 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         else:
             xgb_params = XGBOOST_PARAMS
         logger.info(f"🌲 Entrenando XGBoost ({len(X)} filas, {X.shape[1]} features)...")
-        xgb_model = XGBClassifier(**xgb_params)
+        # Platt scaling (sigmoid) con cv=5 para suavizar la confianza extrema
+        # de los clasificadores binarios independientes por piloto.
+        # CalibratedClassifierCV(cv=5) usa validacion cruzada para calibrar,
+        # entrenando 5 modelos base y promediando sus probabilidades calibradas.
+        xgb_base = XGBClassifier(**xgb_params)
+        xgb_model = CalibratedClassifierCV(xgb_base, cv=5, method="sigmoid")
         xgb_model.fit(X, y)
-        logger.info("   XGBoost listo.")
+        logger.info("   XGBoost calibrado (Platt scaling, cv=5) listo.")
 
     # 3. TabNet — inferencia solo en local
     scaler = StandardScaler()
@@ -204,18 +210,23 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         logger.info("   TabNet listo.")
 
     # 4. Métricas de importancia → Looker Studio
+    # Importancias XGBoost: promedio de los 5 modelos del cv (cada uno es un fold)
+    def _xgb_importances(calibrated_model):
+        imps = [cc.estimator.feature_importances_ for cc in calibrated_model.calibrated_classifiers_]
+        return np.mean(imps, axis=0)
+
     if xgb_model is not None and tab_model is not None:
         logger.info("📊 Calculando importancia de variables (ambos modelos)...")
         importance_df = pd.DataFrame({
             "feature":             FEATURE_COLS,
-            "importance_xgboost":  xgb_model.feature_importances_,
+            "importance_xgboost":  _xgb_importances(xgb_model),
             "importance_tabnet":   tab_model.feature_importances_,
         }).sort_values("importance_xgboost", ascending=False)
     elif xgb_model is not None:
         logger.info("📊 Calculando importancia de variables (XGBoost)...")
         importance_df = pd.DataFrame({
             "feature":             FEATURE_COLS,
-            "importance_xgboost":  xgb_model.feature_importances_,
+            "importance_xgboost":  _xgb_importances(xgb_model),
         }).sort_values("importance_xgboost", ascending=False)
     elif tab_model is not None:
         logger.info("📊 Calculando importancia de variables (TabNet)...")

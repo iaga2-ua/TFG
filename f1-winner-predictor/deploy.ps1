@@ -32,6 +32,7 @@
     .\deploy.ps1 -Mode all -Refresh
     .\deploy.ps1 -Mode all -Refresh -Optimize
     .\deploy.ps1 -Mode predict -Round 2 -Year 2026
+    .\.deploy.ps1 -Mode predict -Round 2 -Year 2026 -NoUpload
 #>
 
 param(
@@ -42,7 +43,8 @@ param(
     [int]$Year  = (Get-Date).Year,
 
     [switch]$Refresh,
-    [switch]$Optimize
+    [switch]$Optimize,
+    [switch]$NoUpload
 )
 
 Set-StrictMode -Version Latest
@@ -172,11 +174,14 @@ if ($Mode -eq "predict") {
     Write-Step "Prediccion TabNet (local) -- $Year Round $Round"
 
     $tabOutputFile = Join-Path $env:TEMP "f1_tabnet_${Year}_${Round}.txt"
+    $predictArgs = @("--round", $Round, "--year", $Year)
+    if ($NoUpload) { $predictArgs += "--no-upload" }
+
     Push-Location $ProjectDir
     docker compose run --rm `
         -v "${ScriptDir}/predict.py:/app/predict.py" `
         -v "${ScriptDir}/src/predict_lambda.py:/app/src/predict_lambda.py" `
-        trainer python predict.py --round $Round --year $Year | Tee-Object -FilePath $tabOutputFile
+        trainer python predict.py @predictArgs | Tee-Object -FilePath $tabOutputFile
     $LASTEXITCODE_TAB = $LASTEXITCODE
     Pop-Location
     if ($LASTEXITCODE_TAB -ne 0) {

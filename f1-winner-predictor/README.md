@@ -107,7 +107,24 @@ XGBoost predice cada piloto como un clasificador binario independiente: "¿gana 
 
 **Normalización** (aplicada en `predict_lambda.py` y `predict.py`): tras `predict_proba`, las probabilidades se dividen entre su suma para que sean interpretables como cuota relativa de victoria entre los pilotos en liza.
 
-**Platt scaling** (`CalibratedClassifierCV`, aplicado en `train.py`): ajusta una regresión logística sigmoide sobre las salidas del XGBoost base usando validación cruzada de 5 folds. Suaviza la confianza extrema antes de que llegue a la normalización, produciendo probabilidades más acordes a la frecuencia empírica de victorias.
+**Platt scaling** (`CalibratedClassifierCV`, aplicado en `train.py`): resuelve la confianza extrema ajustando una regresión logística sigmoide sobre las salidas del XGBoost base. El modelo calibrado aprende dos parámetros $A$ y $B$ que mapean la probabilidad bruta $s$ a una probabilidad calibrada $p$:
+
+$$p_{\text{cal}} = \frac{1}{1 + e^{-(A \cdot s + B)}}$$
+
+El parámetro $A$ escala la pendiente (reduce la sobreconfianza cuando $|A| < 1$) y $B$ corrige el sesgo sistemático. Gracias a estos dos grados de libertad, Platt scaling puede corregir tanto la magnitud de las probabilidades como un desplazamiento global del modelo.
+
+**Implementación con validación cruzada** (`cv=5`): para evitar sobreajuste, se usan 5 folds. En cada fold, XGBoost se entrena en 4 partes; sus predicciones sobre la parte restante (que el modelo no vio) alimentan la regresión logística. Al predecir, se promedian las salidas de los 5 pares $(A_k, B_k)$.
+
+**Diferencia con Temperature Scaling** (usado en TabNet):
+
+| | Platt Scaling (XGBoost) | Temperature Scaling (TabNet) |
+|---|---|---|
+| Parámetros | $A$ y $B$ (2 params) | Solo $T$ (1 param) |
+| Puede cambiar el ranking | Sí ($A \neq 1$ altera el orden) | No (el argmax es idéntico) |
+| Corrige sesgo global | Sí (con $B$) | No |
+| Riesgo de sobreajuste | Mayor con pocos datos | Menor |
+
+Se usa Platt en XGBoost porque sus dos grados de libertad corrigen también el sesgo del modelo. Se usa Temperature Scaling en TabNet porque con ~50 muestras de calibración ajustar solo $T$ es más robusto.
 
 | Ejemplo (GP China 2026, ANT desde pole) | Sin calibrar | Calibrado |
 |---|---|---|
@@ -121,7 +138,28 @@ El modelo guardado en S3 (`xgboost_f1_winner.pkl`) es directamente el `Calibrate
 - Mismos datos y features que XGBoost
 - Estandarización previa con `StandardScaler`
 - Hiperparámetros optimizados con **Optuna** (ROC-AUC, validación 20%)
-- Artefactos en local: `models/tabnet_model.zip` + `models/scaler.pkl`
+- Artefactos en local: `models/tabnet_model.zip` + `models/scaler.pkl` + `models/tabnet_temperature.pkl`
+
+#### Calibración de probabilidades (Temperature Scaling)
+
+Las redes neuronales tienden a ser **sobreconfiadas**: la función softmax final produce probabilidades muy cercanas a 1 aunque la predicción sea incierta. Esto se corrige con **Temperature Scaling**, la técnica de calibración más habitual en producción para redes neuronales ([Guo et al., 2017](https://arxiv.org/abs/1706.04599)).
+
+La idea es dividir los logits $z$ (pre-sigmoid) por una temperatura $T \geq 1$ antes de calcular la probabilidad final:
+
+$$p_{\text{cal}} = \sigma\!\left(\frac{z}{T}\right) = \frac{1}{1 + e^{-z/T}}$$
+
+- $T = 1$: sin cambio (modelo original)
+- $T > 1$: aplana las probabilidades, reduce la sobreconfianza
+- $T < 1$: concentra las probabilidades, aumenta la confianza (raro en redes neuronales)
+
+**Cómo se aprende $T$** (`train.py → _fit_temperature`): TabNet se entrena con el **80%** de los datos. Con el **20% restante** (set de calibración) se minimiza la NLL (*Negative Log-Likelihood*) con L-BFGS para encontrar el $T$ óptimo. El resultado se guarda en `models/tabnet_temperature.pkl`.
+
+**Cómo se aplica** (`predict.py → predict_race`): al predecir, se extraen los logits de las probabilidades brutas de TabNet ($z = \log\frac{p}{1-p}$), se dividen entre $T$ y se pasa por sigmoid. Si el archivo de temperatura no existe (modelo antiguo), se usa $T = 1.0$ con un aviso.
+
+| Ejemplo | Sin calibrar | Con Temperature Scaling ($T > 1$) |
+|---|---|---|
+| Probabilidad bruta TabNet | ~95% | ~60–70% |
+| Interpretación | Sobreconfianza severa | Más próxima a la frecuencia real |
 
 > **Razón del diseño dual**: TabNet requiere PyTorch (~1 GB de dependencias), incompatible con los límites prácticos de AWS Lambda. XGBoost es ligero (~50 MB) y se despliega sin problemas. Correr ambos modelos permite comparar sus predicciones directamente.
 
@@ -167,7 +205,7 @@ Las predicciones y métricas se sincronizan automáticamente con Google Sheets (
 |---|---|---|
 | **Sheet1** | `history.csv` — predicciones 2026 por carrera | Al predecir (sábado) y al registrar resultado (lunes) |
 | **feature_importance** | Importancia de cada feature en XGBoost y TabNet | Al reentrenar con `--upload-s3` |
-| **model_accuracy** | Accuracy acumulada de ambos modelos carrera a carrera | Al registrar el ganador real (lunes) |
+| **model_accuracy** | Accuracy, Brier Score y MAE posicional acumulados carrera a carrera | Al registrar el ganador real (lunes) |
 
 ### Gráficos en Looker Studio
 
@@ -176,6 +214,57 @@ Las predicciones y métricas se sincronizan automáticamente con Google Sheets (
 | **Tabla de predicciones** | Sheet1 | Dimensiones: `event_name`, `predicted_winner_xgb`, `predicted_winner_tab`, `actual_winner`, `xgb_correct`, `tab_correct` / Métricas: `win_prob_xgboost`, `win_prob_tabnet` |
 | **Barras de importancia** | `feature_importance` | Dimensión Y: `feature` / Métricas X: `importance_xgboost` + `importance_tabnet` |
 | **Línea de accuracy** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_accuracy_cumul` + `tab_accuracy_cumul` |
+| **Línea de Brier Score** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_brier_cumul` + `tab_brier_cumul` (↓ mejor, mín 0) |
+| **Línea de MAE posicional** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_pos_mae_cumul` + `tab_pos_mae_cumul` (↓ mejor, mín 0) |
+
+---
+
+## Métricas de evaluación
+
+Cada vez que se registra el ganador real (`--record-result`), se calculan y sincronizan tres métricas acumuladas para comparar XGBoost y TabNet:
+
+### Accuracy acumulada
+
+Fracción de carreras en las que el modelo acertó el ganador:
+
+$$\text{Accuracy} = \frac{\text{carreras acertadas}}{\text{carreras disputadas}}$$
+
+Columnas: `xgb_accuracy_cumul`, `tab_accuracy_cumul`.
+
+### Brier Score acumulado
+
+Mide la **calibración de probabilidades** — no solo si acertó, sino cuán seguro estaba el modelo cuando acertó o falló. Cuanto más bajo, mejor (0 = perfecto, 1 = completamente equivocado con total confianza):
+
+$$BS = \frac{1}{N}\sum_{i=1}^{N}(p_i - y_i)^2$$
+
+Donde $p_i$ es la probabilidad asignada al piloto predicho e $y_i \in \{0, 1\}$ indica si realmente ganó.
+
+**Cómo se calcula en el código** (`aws_utils.py → sync_model_accuracy_to_sheets`):
+```python
+# xgb_brier_i = (win_prob_xgboost - xgb_correct)²
+df["xgb_brier"] = (df["win_prob_xgboost"] - df["xgb_correct"]) ** 2
+df["xgb_brier_cumul"] = df["xgb_brier"].expanding().mean()
+```
+
+Columnas: `xgb_brier`, `xgb_brier_cumul`, `tab_brier`, `tab_brier_cumul`.
+
+### MAE posicional acumulado
+
+Mide **cuántas posiciones se equivocó** el modelo respecto al 1er puesto. Si el modelo predijo a VER y VER terminó P5, el error es 4. Si acertó el ganador, el error es 0:
+
+$$\text{MAE}_{\text{pos}} = \frac{1}{N}\sum_{i=1}^{N}|\text{pos\_final}_i - 1|$$
+
+Donde $\text{pos\_final}_i$ es la posición en carrera del piloto que el modelo predijo como ganador.
+
+**Cómo se obtiene** (`predict.py → record_actual_result`): al registrar el resultado real, FastF1 descarga la clasificación de carrera y busca en qué posición terminó el piloto predicho por cada modelo. Ese dato se guarda en `xgb_predicted_finish_pos` / `tab_predicted_finish_pos` dentro de `history.csv`.
+
+```python
+# En record_actual_result():
+xgb_finish_pos = results[results["Abbreviation"] == xgb_pred]["Position"].values[0]
+# Error_i = |pos_final - 1|  →  0 si ganó, 4 si fue P5, etc.
+```
+
+Columnas: `xgb_predicted_finish_pos`, `xgb_pos_mae_cumul`, `tab_predicted_finish_pos`, `tab_pos_mae_cumul`.
 
 ---
 
@@ -258,9 +347,10 @@ docker compose run --rm trainer python predict.py --round 2 --year 2026 --record
 
 Esto:
 1. Descarga el resultado desde FastF1
-2. Escribe `actual_winner`, `xgb_correct` y `tab_correct` en S3
+2. Escribe `actual_winner`, `xgb_correct`, `tab_correct`, `xgb_predicted_finish_pos` y `tab_predicted_finish_pos` en S3
 3. Sincroniza Sheet1 con el resultado real
-4. Actualiza la pestaña `model_accuracy` con la accuracy acumulada
+4. Actualiza la pestaña `model_accuracy` con accuracy, Brier Score y MAE posicional acumulados
+5. Guarda `metrics/model_accuracy/model_accuracy.csv` en S3 para Athena
 
 ---
 

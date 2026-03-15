@@ -72,6 +72,7 @@ f1-winner-predictor/
 | **Clasificación** | `quali_gap_to_pole_s` | Gap al pole en segundos. Se calcula como `min(Q1, Q2, Q3)` para capturar la mejor vuelta real de cada piloto independientemente de la sesión en que fue eliminado |
 | **Práctica libre** | `fp2_long_run_pace_gap_s` | Gap al mejor ritmo de carrera en FP2 |
 | **Práctica libre** | `fp3_gap_to_best_s` | Gap al mejor tiempo en FP3 |
+| **Sprint Race** | `sprint_race_position` | Posición en el Sprint Race (0 = GP sin sprint). Proxy de ritmo real en carrera, disponible antes de la clasificación del sábado |
 | **Meteorología** | `rain_probability` | Fracción de la sesión con lluvia (0–1) |
 | **Meteorología** | `is_wet_qualifying` | Binario: clasificación en mojado |
 | **Meteorología** | `track_temp_c`, `humidity_pct`, `wind_speed_ms` | Condiciones durante la clasificación |
@@ -96,6 +97,24 @@ f1-winner-predictor/
 - Hiperparámetros optimizados con **Optuna** (ROC-AUC, 5-fold CV estratificado)
 - Entrenado con datos 2023–2026 (solo carreras ya disputadas)
 - Artefactos en S3: `models/xgboost_f1_winner.pkl` + `models/label_encoders.pkl`
+
+#### Calibración de probabilidades (Platt scaling)
+
+XGBoost predice cada piloto como un clasificador binario independiente: "¿gana sí/no?". Esto genera dos problemas al mostrar las probabilidades de victoria:
+
+1. **Confianza extrema**: XGBoost tiende a dar probabilidades brutas muy cercanas a 0 o 1 (ej. 96% para el poleman), muy superiores a la frecuencia real de victorias desde pole (~40–45%).
+2. **No suman 1**: Las probabilidades de los 22 clasificadores independientes no tienen por qué sumar 100%.
+
+**Normalización** (aplicada en `predict_lambda.py` y `predict.py`): tras `predict_proba`, las probabilidades se dividen entre su suma para que sean interpretables como cuota relativa de victoria entre los pilotos en liza.
+
+**Platt scaling** (`CalibratedClassifierCV`, aplicado en `train.py`): ajusta una regresión logística sigmoide sobre las salidas del XGBoost base usando validación cruzada de 5 folds. Suaviza la confianza extrema antes de que llegue a la normalización, produciendo probabilidades más acordes a la frecuencia empírica de victorias.
+
+| Ejemplo (GP China 2026, ANT desde pole) | Sin calibrar | Calibrado |
+|---|---|---|
+| Probabilidad bruta → normalizada | 96.9% | 61.9% |
+| Interpretación | Imposiblemente alta | Razonable (pole + 0.0s gap) |
+
+El modelo guardado en S3 (`xgboost_f1_winner.pkl`) es directamente el `CalibratedClassifierCV`, que expone la misma interfaz `predict_proba` que el XGBoost base — Lambda no necesita ningún cambio.
 
 ### TabNet (local)
 - Red neuronal tabular con mecanismo de atención (pytorch-tabnet)
@@ -265,6 +284,45 @@ aws lambda update-function-code --function-name f1-winner-predictor `
   --region eu-west-1
 aws lambda wait function-updated --function-name f1-winner-predictor --region eu-west-1
 ```
+
+---
+
+## Fins de semana sprint
+
+En un sprint weekend el calendario difiere del habitual:
+
+| Sesión | GP normal | GP sprint |
+|---|---|---|
+| Viernes mañana | FP1 | FP1 |
+| Viernes tarde | FP2 | Sprint Qualifying (SQ) |
+| Sábado mañana | FP3 | Sprint Race (S) |
+| Sábado tarde | Qualifying (Q) | Qualifying (Q) |
+
+Esto genera dos problemas estructurales para el modelo si no se trata explícitamente:
+
+### 1. FP2/FP3 no existen → fallback a FP1
+
+`fetch_practice_pace` intenta cargar FP2 y FP3. En un sprint weekend ambas sesiones no existen y FastF1 lanza una excepción. Sin corrección, `fp2_long_run_pace_gap_s` y `fp3_gap_to_best_s` se rellenarían con `0` para **todos** los pilotos tras el `fillna(0)` de `apply_features`, borrando toda la información de ritmo de práctica y haciendo que el modelo no pueda diferenciar a los pilotos por pace.
+
+**Fix implementado** (`fetch_practice_pace`): cuando ambas sesiones vuelven vacías, se carga FP1. Los gaps de mejor vuelta de FP1 por piloto (respecto al más rápido) se usan como sustituto para ambas columnas. Es un proxy degradado pero real —FP1 tiene datos de ritmo real, al contrario que un cero artificial.
+
+### 2. Puntos del Sprint Race no contabilizados en el campeonato
+
+`race_results_raw.csv` solo almacenaba puntos de la carrera principal. En un sprint weekend los pilotos obtienen puntos adicionales del Sprint Race (hasta 8 pts por P1 desde 2023). Si esos puntos no se incluyen, las features `driver_champ_points` y `constructor_champ_points` quedan subestimadas a partir de esa ronda, contaminando el cálculo de standings de todas las carreras siguientes de la temporada.
+
+**Fix implementado** (`fetch_season_results`): se intenta cargar la sesión `"S"` (Sprint Race) para cada ronda. Si existe, los puntos de sprint de cada piloto se suman a los de la carrera principal en la columna `points` de `race_results_raw.csv`. Como `_championship_standings` y `_enrich_live_from_history` suman esa columna directamente, los standings quedan correctos de forma automática sin cambios en `feature_engineering.py`.
+
+### Impacto del fix
+
+| Feature | Sin fix (sprint weekend) | Con fix |
+|---|---|---|
+| `fp2_long_run_pace_gap_s` | `0` para todos | Gap real desde FP1 |
+| `fp3_gap_to_best_s` | `0` para todos | Gap real desde FP1 |
+| `sprint_race_position` | `0` (sin sprint) | Posición real del Sprint Race |
+| `driver_champ_points` | Subestimado | Exacto (main race + sprint) |
+| `constructor_champ_points` | Subestimado | Exacto (main race + sprint) |
+
+> **Nota**: Tras cualquier cambio en `data_collection.py` hay que regenerar `race_results_raw.csv` con `--refresh-data` para que los datos históricos reflejen el fix.
 
 ---
 

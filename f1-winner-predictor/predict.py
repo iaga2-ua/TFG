@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 
 from config import (
     CURRENT_SEASON, ENCODER_FILE, FASTF1_CACHE, RAW_DIR,
-    TABNET_MODEL_PATH, SCALER_FILE,
+    TABNET_MODEL_PATH, SCALER_FILE, TABNET_TEMPERATURE_FILE,
 )
 from src.data_collection import fetch_qualifying_snapshot
 
@@ -53,26 +53,32 @@ logger = logging.getLogger(__name__)
 # --- Carga de modelos --------------------------------------------------------
 
 def load_tabnet():
-    """Carga TabNet, Scaler y los encoders de etiquetas (generados durante el entrenamiento)."""
+    """Carga TabNet, Scaler, temperatura y los encoders de etiquetas."""
     tabnet_zip = TABNET_MODEL_PATH.with_suffix(".zip")
     if not (TABNET_MODEL_PATH.exists() or tabnet_zip.exists()) or not SCALER_FILE.exists():
         logger.warning("TabNet o Scaler no encontrados en /models. Ejecuta train.py primero.")
-        return None, None, {}
+        return None, None, {}, 1.0
     from pytorch_tabnet.tab_model import TabNetClassifier
     tab = TabNetClassifier()
     tab.load_model(str(TABNET_MODEL_PATH) + ".zip")
     with open(SCALER_FILE, "rb") as f:
         scaler = pickle.load(f)
-    # Los encoders (circuit_encoded, constructor_encoded) son los mismos para
-    # XGBoost y TabNet: generados una sola vez en build_features durante el entrenamiento.
     encoders = {}
     if ENCODER_FILE.exists():
         with open(ENCODER_FILE, "rb") as f:
             encoders = pickle.load(f)
     else:
         logger.warning("ENCODER_FILE no encontrado: circuit_encoded/constructor_encoded seran -1.")
+    temperature = 1.0
+    if TABNET_TEMPERATURE_FILE.exists():
+        with open(TABNET_TEMPERATURE_FILE, "rb") as f:
+            temperature = pickle.load(f)
+        logger.info("Temperature Scaling cargado: T=%.4f", temperature)
+    else:
+        logger.warning("tabnet_temperature.pkl no encontrado — usando T=1.0 (sin calibrar). "
+                       "Reentrena con train.py para generarlo.")
     logger.info("TabNet + Scaler + encoders cargados.")
-    return tab, scaler, encoders
+    return tab, scaler, encoders, temperature
 
 
 # --- Historial para rolling features ----------------------------------------
@@ -109,7 +115,7 @@ def predict_race(
 
     df_live = fetch_qualifying_snapshot(year, round_num)
 
-    tab_model, scaler, encoders = load_tabnet()
+    tab_model, scaler, encoders, temperature = load_tabnet()
     if tab_model is None:
         raise RuntimeError(
             "TabNet no disponible. Ejecuta 'python train.py --model tabnet' primero."
@@ -118,7 +124,15 @@ def predict_race(
     history_df = load_history()
     X          = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
     X_scaled   = scaler.transform(X)
-    probs_tab  = tab_model.predict_proba(X_scaled)[:, 1]
+
+    # Obtener logits internos y aplicar Temperature Scaling antes del sigmoid
+    # p_cal = sigmoid(logit / T),  T > 1 reduce la sobreconfianza
+    raw_probs = tab_model.predict_proba(X_scaled)[:, 1]
+    eps = 1e-7
+    raw_probs = np.clip(raw_probs, eps, 1 - eps)
+    logits    = np.log(raw_probs / (1 - raw_probs))
+    cal_probs = 1.0 / (1.0 + np.exp(-logits / temperature))
+    probs_tab = cal_probs
 
     # Normalizar entre los N pilotos del GP para que las probabilidades
     # sumen 1 y sean interpretables como cuota relativa de victoria.
@@ -183,12 +197,44 @@ def record_actual_result(year: int, round_num: int) -> None:
     fastf1.Cache.enable_cache(FASTF1_CACHE)
     session = fastf1.get_session(year, round_num, "R")
     session.load(laps=False, telemetry=False, weather=False)
-    winner = session.results.loc[
-        session.results["Position"] == 1, "Abbreviation"
-    ].values[0]
+
+    results = session.results.copy()
+    results["Position"] = pd.to_numeric(results["Position"], errors="coerce")
+
+    winner = results.loc[results["Position"] == 1, "Abbreviation"].values[0]
     logger.info(f"🏆 Ganador real: {winner}")
-    from src.aws_utils import update_actual_winner
-    update_actual_winner(year, round_num, winner)
+
+    # Obtener la posición final del piloto que cada modelo predijo,
+    # para calcular MAE posicional (cuán lejos terminó del 1er puesto).
+    from src.aws_utils import update_actual_winner, read_history_csv
+    history = read_history_csv()
+    h_mask = (history["year"] == year) & (history["round"] == round_num)
+
+    def _finish_pos(abbr):
+        if not abbr or (isinstance(abbr, float) and pd.isna(abbr)):
+            return None
+        row = results[results["Abbreviation"] == abbr]
+        if row.empty:
+            return None
+        pos = row["Position"].values[0]
+        return int(pos) if pd.notna(pos) else None
+
+    xgb_finish_pos, tab_finish_pos = None, None
+    if not history[h_mask].empty:
+        xgb_pred = history.loc[h_mask, "predicted_winner_xgb"].values[0]
+        tab_pred = history.loc[h_mask, "predicted_winner_tab"].values[0]
+        xgb_finish_pos = _finish_pos(xgb_pred)
+        tab_finish_pos = _finish_pos(tab_pred)
+        if xgb_finish_pos is not None:
+            logger.info("XGBoost predijo %s → terminó P%d", xgb_pred, xgb_finish_pos)
+        if tab_finish_pos is not None:
+            logger.info("TabNet  predijo %s → terminó P%d", tab_pred, tab_finish_pos)
+
+    update_actual_winner(
+        year, round_num, winner,
+        xgb_finish_pos=xgb_finish_pos,
+        tab_finish_pos=tab_finish_pos,
+    )
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────

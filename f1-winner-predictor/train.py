@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT))
 from config import (
     ENCODER_FILE, FEATURE_COLS, MODEL_FILE, OPTUNA_N_TRIALS,
     PROCESSED_DIR, RAW_DIR, TRAIN_SEASONS, XGBOOST_PARAMS,
+    TABNET_TEMPERATURE_FILE,
 )
 from src.data_collection import collect_all_seasons
 from src.feature_engineering import build_features
@@ -51,6 +52,54 @@ from src.feature_engineering import build_features
 # ─── Rutas de artefactos locales ─────────────────────────────────────────────
 TABNET_FILE = ROOT / "models" / "tabnet_model"   # pytorch-tabnet añade .zip
 SCALER_FILE = ROOT / "models" / "scaler.pkl"
+
+
+# ─── Temperature Scaling ─────────────────────────────────────────────────────
+
+def _fit_temperature(
+    tab_model,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    n_steps: int = 200,
+    lr: float = 0.01,
+) -> float:
+    """
+    Aprende la temperatura T optima para calibrar las probabilidades de TabNet.
+
+    El modelo produce logits z; la probabilidad calibrada es:
+        p_cal = sigmoid(z / T)
+    Optimizamos T minimizando la NLL (log-loss) en el conjunto de validacion.
+    T > 1 reduce la confianza (caso habitual cuando el modelo es sobreconfiado).
+    T < 1 la aumenta (raro con redes neuronales).
+
+    Devuelve T como float. Se guarda en TABNET_TEMPERATURE_FILE y se aplica
+    en predict.py antes de devolver las probabilidades.
+    """
+    # Obtener logits (log-probabilidades internas antes del sigmoid final)
+    raw_probs = tab_model.predict_proba(X_val)[:, 1]   # probas en [0,1]
+    # Convertir a logits: z = log(p / (1 - p))  con clip para evitar inf
+    eps = 1e-7
+    raw_probs = np.clip(raw_probs, eps, 1 - eps)
+    logits = np.log(raw_probs / (1 - raw_probs)).astype(np.float32)
+
+    T = torch.nn.Parameter(torch.ones(1))
+    optimizer = torch.optim.LBFGS([T], lr=lr, max_iter=n_steps)
+    logits_t  = torch.tensor(logits)
+    labels_t  = torch.tensor(y_val.astype(np.float32))
+    criterion = torch.nn.BCEWithLogitsLoss()
+
+    def _closure():
+        optimizer.zero_grad()
+        # Clamp T >= 0.1 para evitar division por cero o temperaturas negativas
+        T.data = T.data.clamp(min=0.1)
+        loss = criterion(logits_t / T, labels_t)
+        loss.backward()
+        return loss
+
+    optimizer.step(_closure)
+    T_opt = float(T.item())
+    logger.info("🌡️  Temperature Scaling TabNet: T = %.4f", T_opt)
+    return T_opt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -171,6 +220,7 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
     # 3. TabNet — inferencia solo en local
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    tab_temperature = 1.0   # valor neutro; se sobreescribe si se entrena TabNet
 
     if model in ("tabnet", "all"):
         if optimize:
@@ -197,9 +247,14 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
                 mask_type="entmax",
             )
         logger.info("🧠 Entrenando TabNet (inferencia local)...")
+        # Reservar 20% para calibración de temperatura; TabNet se entrena en el 80%
+        X_tab_train, X_tab_cal, y_tab_train, y_tab_cal = train_test_split(
+            X_scaled, y.values, test_size=0.2, random_state=42, stratify=y.values
+        )
         tab_model.fit(
-            X_train=X_scaled,
-            y_train=y.values,
+            X_train=X_tab_train,
+            y_train=y_tab_train,
+            eval_set=[(X_tab_cal, y_tab_cal)],
             max_epochs=50,
             patience=10,
             batch_size=tab_batch,
@@ -207,7 +262,9 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
             num_workers=0,
             drop_last=False,
         )
-        logger.info("   TabNet listo.")
+        # Temperature Scaling: aprende T en el conjunto de calibración
+        tab_temperature = _fit_temperature(tab_model, X_tab_cal, y_tab_cal)
+        logger.info("   TabNet listo (T=%.4f).", tab_temperature)
 
     # 4. Métricas de importancia → Looker Studio
     # Importancias XGBoost: promedio de los 5 modelos del cv (cada uno es un fold)
@@ -286,8 +343,9 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         logger.info("   ✅ XGBoost + encoders guardados.")
     if tab_model is not None:
         with open(SCALER_FILE, "wb") as f: pickle.dump(scaler, f)
+        with open(TABNET_TEMPERATURE_FILE, "wb") as f: pickle.dump(tab_temperature, f)
         tab_model.save_model(str(TABNET_FILE))   # genera tabnet_model.zip
-        logger.info("   ✅ TabNet + Scaler guardados (solo local).")
+        logger.info("   ✅ TabNet + Scaler + temperatura guardados (solo local).")
 
     # 6. Subir artefactos XGBoost a S3 → disponible para AWS Lambda
     if upload_s3:

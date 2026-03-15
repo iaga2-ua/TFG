@@ -102,9 +102,13 @@ def append_to_history_csv(new_row) -> None:
         existing_idx = existing.set_index(key_cols)
         # Sobrescribir solo celdas no-NaN del new_row: permite correcciones
         # pero preserva columnas que la otra parte (XGB vs TabNet) ya escribió.
+        # Solo actualizamos filas que YA existen en existing_idx; las nuevas
+        # se añaden vía new_only más abajo (evita KeyError en MultiIndex).
         for col in new_idx.columns:
             non_nan = new_idx[col].notna()
-            existing_idx.loc[new_idx.index[non_nan], col] = new_idx.loc[non_nan, col]
+            overlap = new_idx.index[non_nan].intersection(existing_idx.index)
+            if not overlap.empty:
+                existing_idx.loc[overlap, col] = new_idx.loc[overlap, col]
         new_only = new_idx[~new_idx.index.isin(existing_idx.index)]
         combined = pd.concat([existing_idx, new_only]).reset_index()
         combined = combined[[c for c in HISTORY_COLUMNS if c in combined.columns]]

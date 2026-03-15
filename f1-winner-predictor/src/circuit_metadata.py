@@ -22,36 +22,40 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- TABLA ESTATICA (solo lo que FastF1 no ofrece) ---------------------------
+# --- TABLA ESTATICA ---------------------------------------------------------
 # Clave = string Location devuelto por FastF1 (event["Location"])
+# track_length_km y corner_count se usan como fallback cuando
+# get_circuit_info() falla (sesion cargada sin laps=True).
 _STATIC_META: dict[str, dict] = {
-    "Sakhir":            {"overtake_difficulty": 1, "drs_zones": 3, "avg_safety_car_prob": 0.25},
-    "Jeddah":            {"overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.55},
-    "Melbourne":         {"overtake_difficulty": 2, "drs_zones": 4, "avg_safety_car_prob": 0.60},
-    "Suzuka":            {"overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.35},
-    "Shanghai":          {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
-    "Miami":             {"overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.45},
-    "Imola":             {"overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.50},
-    "Monte-Carlo":       {"overtake_difficulty": 5, "drs_zones": 1, "avg_safety_car_prob": 0.70},
-    "Barcelona":         {"overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.20},
-    "Montreal":          {"overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.60},
-    "Spielberg":         {"overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.35},
-    "Silverstone":       {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.40},
-    "Budapest":          {"overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.25},
-    "Spa-Francorchamps": {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.50},
-    "Zandvoort":         {"overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.30},
-    "Monza":             {"overtake_difficulty": 1, "drs_zones": 2, "avg_safety_car_prob": 0.45},
-    "Baku":              {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.70},
-    "Singapore":         {"overtake_difficulty": 4, "drs_zones": 3, "avg_safety_car_prob": 0.75},
-    "Austin":            {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
-    "Mexico City":       {"overtake_difficulty": 3, "drs_zones": 3, "avg_safety_car_prob": 0.30},
-    "Sao Paulo":         {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.60},
-    "Las Vegas":         {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.50},
-    "Lusail":            {"overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
-    "Abu Dhabi":         {"overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.25},
+    "Sakhir":            {"track_length_km": 5.412, "corner_count": 15, "overtake_difficulty": 1, "drs_zones": 3, "avg_safety_car_prob": 0.25},
+    "Jeddah":            {"track_length_km": 6.174, "corner_count": 27, "overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.55},
+    "Melbourne":         {"track_length_km": 5.278, "corner_count": 16, "overtake_difficulty": 2, "drs_zones": 4, "avg_safety_car_prob": 0.60},
+    "Suzuka":            {"track_length_km": 5.807, "corner_count": 18, "overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.35},
+    "Shanghai":          {"track_length_km": 5.451, "corner_count": 16, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
+    "Miami":             {"track_length_km": 5.412, "corner_count": 19, "overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.45},
+    "Imola":             {"track_length_km": 4.909, "corner_count": 19, "overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.50},
+    "Monte-Carlo":       {"track_length_km": 3.337, "corner_count": 19, "overtake_difficulty": 5, "drs_zones": 1, "avg_safety_car_prob": 0.70},
+    "Barcelona":         {"track_length_km": 4.657, "corner_count": 14, "overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.20},
+    "Montreal":          {"track_length_km": 4.361, "corner_count": 14, "overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.60},
+    "Spielberg":         {"track_length_km": 4.318, "corner_count": 10, "overtake_difficulty": 2, "drs_zones": 3, "avg_safety_car_prob": 0.35},
+    "Silverstone":       {"track_length_km": 5.891, "corner_count": 18, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.40},
+    "Budapest":          {"track_length_km": 4.381, "corner_count": 14, "overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.25},
+    "Spa-Francorchamps": {"track_length_km": 7.004, "corner_count": 19, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.50},
+    "Zandvoort":         {"track_length_km": 4.259, "corner_count": 14, "overtake_difficulty": 4, "drs_zones": 2, "avg_safety_car_prob": 0.30},
+    "Monza":             {"track_length_km": 5.793, "corner_count": 11, "overtake_difficulty": 1, "drs_zones": 2, "avg_safety_car_prob": 0.45},
+    "Baku":              {"track_length_km": 6.003, "corner_count": 20, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.70},
+    "Singapore":         {"track_length_km": 4.940, "corner_count": 19, "overtake_difficulty": 4, "drs_zones": 3, "avg_safety_car_prob": 0.75},
+    "Austin":            {"track_length_km": 5.513, "corner_count": 20, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
+    "Mexico City":       {"track_length_km": 4.304, "corner_count": 17, "overtake_difficulty": 3, "drs_zones": 3, "avg_safety_car_prob": 0.30},
+    "Sao Paulo":         {"track_length_km": 4.309, "corner_count": 15, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.60},
+    "Las Vegas":         {"track_length_km": 6.201, "corner_count": 17, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.50},
+    "Lusail":            {"track_length_km": 5.380, "corner_count": 16, "overtake_difficulty": 2, "drs_zones": 2, "avg_safety_car_prob": 0.35},
+    "Abu Dhabi":         {"track_length_km": 5.281, "corner_count": 16, "overtake_difficulty": 3, "drs_zones": 2, "avg_safety_car_prob": 0.25},
 }
 
 _DEFAULT_STATIC = {
+    "track_length_km": float("nan"),
+    "corner_count": 0,
     "overtake_difficulty": 3,
     "drs_zones": 2,
     "avg_safety_car_prob": 0.40,
@@ -103,12 +107,15 @@ def get_circuit_meta_from_fastf1(session) -> dict:
         location, country = "Unknown", "Unknown"
 
     # -- CircuitInfo de FastF1 (track length, corner count) -------------------
-    corner_count    = 0
-    track_length_km = float("nan")
+    # get_circuit_info() requiere laps en memoria; puede fallar si la sesion
+    # se cargo con laps=False. En ese caso usamos la tabla estatica como fallback.
+    static = _match_static(location)
+    corner_count    = static.get("corner_count", 0)
+    track_length_km = static.get("track_length_km", float("nan"))
     try:
         ci = session.get_circuit_info()
         if ci is not None:
-            # Numero de curvas
+            # Numero de curvas (FastF1 tiene prioridad sobre la tabla estatica)
             if hasattr(ci, "corners") and ci.corners is not None:
                 corner_count = int(len(ci.corners))
 
@@ -121,19 +128,21 @@ def get_circuit_meta_from_fastf1(session) -> dict:
                 track_length_m  = float(ci.marshal_sectors["Distance"].max())
                 track_length_km = round(track_length_m / 1000, 3)
     except Exception as exc:
-        logger.warning(
-            "circuit_metadata: get_circuit_info() fallo para '%s': %s", location, exc
+        logger.debug(
+            "circuit_metadata: get_circuit_info() fallo para '%s' (usando tabla estatica): %s",
+            location, exc,
         )
 
     # -- Combinar dinamico + estatico ------------------------------------------
-    dynamic = {
-        "location":         location,
-        "country":          country,
-        "track_length_km":  track_length_km,
-        "corner_count":     corner_count,
+    return {
+        "location":             location,
+        "country":              country,
+        "track_length_km":      track_length_km,
+        "corner_count":         corner_count,
+        "overtake_difficulty":  static["overtake_difficulty"],
+        "drs_zones":            static["drs_zones"],
+        "avg_safety_car_prob":  static["avg_safety_car_prob"],
     }
-    static = _match_static(location)
-    return {**dynamic, **static}
 
 
 # --- COMPATIBILIDAD CON CODIGO LEGACY ----------------------------------------

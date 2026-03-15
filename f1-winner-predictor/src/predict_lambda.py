@@ -88,6 +88,14 @@ def predict(year: int, round_num: int, upload: bool = True) -> dict:
     X     = apply_features(df_live, encoders, history_df=race_results_df, year=year, round_num=round_num)
     probs = xgb_model.predict_proba(X)[:, 1]
 
+    # Normalizar entre los N pilotos para que las probabilidades sumen 1
+    # y sean interpretables como cuota relativa de victoria.
+    # XGBoost predice cada piloto de forma independiente (clasificacion binaria),
+    # por lo que los valores brutos no suman 1 y pueden ser engañosamente altos.
+    probs_sum = probs.sum()
+    if probs_sum > 0:
+        probs = probs / probs_sum
+
     best_idx    = int(np.argmax(probs))
     winner_abbr = df_live.iloc[best_idx]["driver_abbr"]
     winner_prob = float(probs[best_idx])

@@ -120,6 +120,15 @@ def predict_race(
     X_scaled   = scaler.transform(X)
     probs_tab  = tab_model.predict_proba(X_scaled)[:, 1]
 
+    # Normalizar entre los N pilotos del GP para que las probabilidades
+    # sumen 1 y sean interpretables como cuota relativa de victoria.
+    # TabNet hace clasificacion binaria independiente por piloto, por lo que
+    # los valores brutos son bajos (no suman 1). El argmax es el mismo antes
+    # y despues de normalizar, pero la cifra mostrada tiene sentido semantico.
+    probs_sum = probs_tab.sum()
+    if probs_sum > 0:
+        probs_tab = probs_tab / probs_sum
+
     # --- Ganador predicho: piloto con mayor probabilidad ---
     best_idx    = int(np.argmax(probs_tab))
     winner_abbr = df_live.iloc[best_idx]["driver_abbr"]

@@ -35,6 +35,10 @@ FASTF1_CACHE    = str(CACHE_DIR)
 FEATURE_COLS = [
     "grid_position", "quali_gap_to_pole_s",
     "fp2_long_run_pace_gap_s", "fp3_gap_to_best_s",
+    # Sprint Race result (disponible antes de la clasificación en sprint weekends).
+    # 0 = GP sin sprint (ninguna carrera sprint se disputó).
+    # 1-8 = posición real en el Sprint Race → proxy de ritmo en carrera real.
+    "sprint_race_position",
     "rain_probability", "is_wet_qualifying",
     "track_temp_c", "humidity_pct", "wind_speed_ms",
     "driver_champ_pos", "driver_champ_points",

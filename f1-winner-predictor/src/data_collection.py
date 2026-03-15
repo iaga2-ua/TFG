@@ -150,6 +150,44 @@ def fetch_practice_pace(year: int, round_num: int) -> pd.DataFrame:
             logger.debug(f"  ℹ  {year} R{round_num} {session_name} not available: {exc}")
             pace_frames.append(pd.DataFrame(columns=["driver_abbr", col_out]))
 
+    # Sprint weekend fallback: FP2/FP3 do not exist (schedule: FP1 → SQ → S → Q).
+    # Use FP1 best-lap gaps as a substitute for both columns so the model
+    # receives real pace data instead of all-zero placeholders after fillna(0).
+    if len(pace_frames[0]) == 0 and len(pace_frames[1]) == 0:
+        logger.info(
+            f"  ⚡ {year} R{round_num}: sprint weekend detected — "
+            "falling back to FP1 for practice pace features"
+        )
+        try:
+            sess_fp1 = fastf1.get_session(year, round_num, "FP1")
+            sess_fp1.load(laps=True, telemetry=False, weather=False, messages=False)
+            laps = sess_fp1.laps
+            if laps is not None and not laps.empty:
+                clean = laps[
+                    laps["PitInTime"].isna() &
+                    laps["PitOutTime"].isna() &
+                    laps["IsAccurate"].fillna(True)
+                ].copy()
+                if clean.empty:
+                    clean = laps[
+                        laps["PitInTime"].isna() & laps["PitOutTime"].isna()
+                    ].copy()
+                if not clean.empty:
+                    clean["lap_time_s"] = clean["LapTime"].apply(
+                        lambda t: pd.Timedelta(t).total_seconds() if pd.notna(t) else np.nan
+                    )
+                    clean = clean.dropna(subset=["lap_time_s"])
+                    fastest = clean["lap_time_s"].min()
+                    clean = clean[clean["lap_time_s"] <= fastest * 1.10]
+                    best_per_driver = clean.groupby("Driver")["lap_time_s"].min()
+                    gap_fp1 = (best_per_driver - best_per_driver.min()).reset_index()
+                    gap_fp1.columns = ["driver_abbr", "fp1_gap"]
+                    # FP1 best-lap gap substitutes both FP2 long-run and FP3 best-lap
+                    pace_frames[0] = gap_fp1.rename(columns={"fp1_gap": "fp2_long_run_pace_gap_s"})
+                    pace_frames[1] = gap_fp1.rename(columns={"fp1_gap": "fp3_gap_to_best_s"})
+        except Exception as exc:
+            logger.debug(f"  ℹ  {year} R{round_num} FP1 also not available: {exc}")
+
     # Merge FP2 and FP3 frames on driver_abbr
     result = pace_frames[0].merge(pace_frames[1], on="driver_abbr", how="outer")
     return result
@@ -193,10 +231,35 @@ def fetch_season_results(year: int) -> pd.DataFrame:
         # Weather features from qualifying session
         weather = _extract_weather_stats(session_quali)
 
-        # Practice pace (FP2 long run + FP3 best lap)
+        # Practice pace (FP2 long run + FP3 best lap; FP1 fallback on sprint weekends)
         practice = fetch_practice_pace(year, round_num)
         # Build lookup: driver_abbr → {fp2_long_run_pace_gap_s, fp3_gap_to_best_s}
         practice_lookup = practice.set_index("driver_abbr").to_dict(orient="index")
+
+        # Sprint Race lookup: puntos y posición (sesión "S").
+        # En GPs normales FastF1 lanza InvalidSessionError → se ignora.
+        # El Sprint Race ocurre el sábado por la mañana, ANTES de la
+        # clasificación, así que sus resultados son válidos como feature.
+        sprint_points_lookup:   dict[str, float] = {}
+        sprint_position_lookup: dict[str, float] = {}
+        try:
+            session_sprint = fastf1.get_session(year, round_num, "S")
+            session_sprint.load(laps=False, telemetry=False, weather=False, messages=False)
+            if session_sprint.results is not None and not session_sprint.results.empty:
+                for _, sr in session_sprint.results.iterrows():
+                    abbr_s = sr.get("Abbreviation")
+                    pts_s  = float(sr.get("Points", 0) or 0)
+                    pos_s  = sr.get("Position")
+                    if abbr_s:
+                        sprint_points_lookup[abbr_s] = pts_s
+                        if pd.notna(pos_s):
+                            sprint_position_lookup[abbr_s] = float(pos_s)
+                logger.info(
+                    f"  🏎  {year} R{round_num}: sprint race — "
+                    f"sprint points + positions added for {len(sprint_points_lookup)} drivers"
+                )
+        except Exception:
+            pass  # Not a sprint weekend
 
         # Merge qualifying grid positions into race results
         quali_cols = ["DriverNumber", "GridPosition", "Q3", "Q2", "Q1", "Position"]
@@ -226,7 +289,7 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                 "team":            row.get("TeamName"),
                 "grid_position":   row.get("GridPosition", row.get("QualiGrid")),
                 "race_position":   row.get("Position"),
-                "points":          row.get("Points", 0),
+                "points":          float(row.get("Points", 0) or 0) + sprint_points_lookup.get(abbr, 0.0),
                 "status":          row.get("Status"),
                 # Best quali time: mínimo entre Q1, Q2, Q3 (mejor vuelta de toda la qualy)
                 "best_quali_time": min(
@@ -242,6 +305,8 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                 # Practice pace
                 "fp2_long_run_pace_gap_s": p_data.get("fp2_long_run_pace_gap_s", np.nan),
                 "fp3_gap_to_best_s":       p_data.get("fp3_gap_to_best_s",       np.nan),
+                # Sprint Race position (0 = GP sin sprint)
+                "sprint_race_position":     sprint_position_lookup.get(abbr, 0.0),
                 # Circuit metadata (FastF1 dynamic + static)
                 "track_length_km":          circuit_meta["track_length_km"],
                 "corner_count":             circuit_meta["corner_count"],
@@ -380,6 +445,27 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         lambda a: practice_lookup.get(a, {}).get("fp3_gap_to_best_s", np.nan)
     )
 
+    # ── Sprint Race position (sábado mañana, antes de la clasificación) ───────
+    sprint_position_lookup: dict[str, float] = {}
+    try:
+        session_sprint = fastf1.get_session(year, round_num, "S")
+        session_sprint.load(laps=False, telemetry=False, weather=False, messages=False)
+        if session_sprint.results is not None and not session_sprint.results.empty:
+            for _, sr in session_sprint.results.iterrows():
+                abbr_s = sr.get("Abbreviation")
+                pos_s  = sr.get("Position")
+                if abbr_s and pd.notna(pos_s):
+                    sprint_position_lookup[abbr_s] = float(pos_s)
+            logger.info(
+                f"🏎  Sprint Race R{round_num}: posiciones cargadas "
+                f"para {len(sprint_position_lookup)} pilotos"
+            )
+    except Exception:
+        pass  # GP normal sin sprint
+    results["sprint_race_position"] = results["driver_abbr"].map(
+        lambda a: sprint_position_lookup.get(a, 0.0)
+    )
+
     # ── Circuit metadata (FastF1 dinamico + tabla estatica) ───────────────────
     # Mismo flujo que en fetch_season_results para que entrenamiento e
     # inferencia (Lambda y local) reciban exactamente las mismas columnas.
@@ -405,6 +491,8 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         "track_temp_c", "humidity_pct", "wind_speed_ms",
         # practice pace
         "fp2_long_run_pace_gap_s", "fp3_gap_to_best_s",
+        # sprint race
+        "sprint_race_position",
         # circuit metadata (FastF1)
         "track_length_km", "corner_count",
         "overtake_difficulty", "drs_zones", "avg_safety_car_prob",

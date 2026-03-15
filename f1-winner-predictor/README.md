@@ -264,26 +264,31 @@ Esto:
 
 ---
 
-## Rebuilding y despliegue de la Lambda
+## Despliegue (`deploy.ps1`)
 
-Obligatorio cuando se modifica `predict_lambda.py`, `aws_utils.py` o `feature_engineering.py`:
+El script `deploy.ps1` automatiza todo el pipeline de despliegue. Acepta tres modos:
+
+| Modo | Qué hace |
+|---|---|
+| `models` | Reentrena XGBoost + TabNet y sube artefactos a S3 (sin tocar Lambda) |
+| `lambda` | Rebuild imagen Docker → push ECR → update función Lambda (sin reentrenar) |
+| `all` | Todo lo anterior en orden |
 
 ```powershell
-# Desde f1-winner-predictor/
-docker build -f Dockerfile.lambda -t f1-winner-predictor .
+# Solo redesplegar Lambda (código cambiado, modelo no):
+.\deploy.ps1 -Mode lambda
 
-aws ecr get-login-password --region eu-west-1 | `
-  docker login --username AWS --password-stdin 606756239522.dkr.ecr.eu-west-1.amazonaws.com
+# Reentrenar y subir modelos a S3 (sin rebuild Lambda):
+.\deploy.ps1 -Mode models
 
-docker tag f1-winner-predictor:latest `
-  606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest
-docker push 606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest
+# Pipeline completo con datos frescos:
+.\deploy.ps1 -Mode all -Refresh
 
-aws lambda update-function-code --function-name f1-winner-predictor `
-  --image-uri 606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest `
-  --region eu-west-1
-aws lambda wait function-updated --function-name f1-winner-predictor --region eu-west-1
+# Pipeline completo con optimización de hiperparámetros:
+.\deploy.ps1 -Mode all -Refresh -Optimize
 ```
+
+> Los archivos `.py` se montan como volúmenes durante el entrenamiento, por lo que los cambios locales son inmediatos sin necesidad de reconstruir la imagen Docker del trainer.
 
 ---
 

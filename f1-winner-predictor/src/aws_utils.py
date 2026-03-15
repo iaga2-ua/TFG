@@ -17,9 +17,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     AWS_REGION, AWS_PROFILE,
-    S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY, S3_RACE_RESULTS_KEY,
+    S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY,
+    S3_RACE_RESULTS_KEY, S3_MODEL_ACCURACY_KEY,
     MODEL_FILE, ENCODER_FILE, RAW_DIR,
-    ATHENA_DATABASE, ATHENA_TABLE, ATHENA_TABLE_IMPORTANCE,
+    ATHENA_DATABASE, ATHENA_TABLE, ATHENA_TABLE_IMPORTANCE, ATHENA_TABLE_ACCURACY,
     ATHENA_OUTPUT_LOC,
 )
 
@@ -35,6 +36,7 @@ HISTORY_COLUMNS = [
     "predicted_winner_tab", "win_prob_tabnet",
     "actual_winner",
     "xgb_correct", "tab_correct",
+    "xgb_predicted_finish_pos", "tab_predicted_finish_pos",
     "prediction_timestamp",
 ]
 
@@ -185,6 +187,8 @@ def setup_athena_table() -> None:
         actual_winner STRING,
         xgb_correct INT,
         tab_correct INT,
+        xgb_predicted_finish_pos INT,
+        tab_predicted_finish_pos INT,
         prediction_timestamp STRING
     )
     ROW FORMAT DELIMITED
@@ -209,9 +213,41 @@ def setup_athena_table() -> None:
     );
     """
 
+    ddl_accuracy = f"""
+    CREATE EXTERNAL TABLE IF NOT EXISTS {ATHENA_DATABASE}.{ATHENA_TABLE_ACCURACY} (
+        year INT,
+        round INT,
+        event_name STRING,
+        circuit STRING,
+        race_label STRING,
+        actual_winner STRING,
+        predicted_winner_xgb STRING,
+        win_prob_xgboost DOUBLE,
+        xgb_correct INT,
+        xgb_predicted_finish_pos INT,
+        xgb_accuracy_cumul DOUBLE,
+        xgb_brier DOUBLE,
+        xgb_brier_cumul DOUBLE,
+        xgb_pos_mae_cumul DOUBLE,
+        predicted_winner_tab STRING,
+        win_prob_tabnet DOUBLE,
+        tab_correct INT,
+        tab_predicted_finish_pos INT,
+        tab_accuracy_cumul DOUBLE,
+        tab_brier DOUBLE,
+        tab_brier_cumul DOUBLE,
+        tab_pos_mae_cumul DOUBLE
+    )
+    ROW FORMAT DELIMITED
+    FIELDS TERMINATED BY ','
+    LOCATION 's3://{S3_BUCKET}/metrics/model_accuracy/'
+    TBLPROPERTIES ('skip.header.line.count'='1');
+    """
+
     for name, ddl in [
         (ATHENA_TABLE,            ddl_predictions),
         (ATHENA_TABLE_IMPORTANCE, ddl_importance),
+        (ATHENA_TABLE_ACCURACY,   ddl_accuracy),
     ]:
         _run_athena_query(ddl)
         logger.info("Tabla Athena '%s' verificada/creada.", name)
@@ -225,9 +261,17 @@ def _run_athena_query(query: str):
         ResultConfiguration={'OutputLocation': ATHENA_OUTPUT_LOC}
     )
 
-def update_actual_winner(year: int, round_num: int, winner_abbr: str):
+def update_actual_winner(
+    year: int,
+    round_num: int,
+    winner_abbr: str,
+    xgb_finish_pos: int = None,
+    tab_finish_pos: int = None,
+):
     """
     Registra el ganador real tras la carrera y calcula xgb_correct / tab_correct.
+    Opcionalmente guarda la posición final del piloto predicho por cada modelo
+    (para calcular MAE posicional y Brier Score en Google Sheets).
     Llamar el lunes post-carrera via: python predict.py --round N --record-result
     """
     df = read_history_csv()
@@ -244,6 +288,10 @@ def update_actual_winner(year: int, round_num: int, winner_abbr: str):
     df.loc[mask, "tab_correct"]   = (
         df.loc[mask, "predicted_winner_tab"] == winner_abbr
     ).astype(int)
+    if xgb_finish_pos is not None:
+        df.loc[mask, "xgb_predicted_finish_pos"] = xgb_finish_pos
+    if tab_finish_pos is not None:
+        df.loc[mask, "tab_predicted_finish_pos"] = tab_finish_pos
 
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -407,9 +455,40 @@ def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
     df["race_label"] = df["event_name"].fillna(df["year"].astype(str) + " R" + df["round"].astype(str))
     df["xgb_correct"] = pd.to_numeric(df["xgb_correct"], errors="coerce")
     df["tab_correct"] = pd.to_numeric(df["tab_correct"], errors="coerce")
+    df["win_prob_xgboost"] = pd.to_numeric(df["win_prob_xgboost"], errors="coerce")
+    df["win_prob_tabnet"]  = pd.to_numeric(df["win_prob_tabnet"],  errors="coerce")
+    df["xgb_predicted_finish_pos"] = pd.to_numeric(df.get("xgb_predicted_finish_pos"), errors="coerce")
+    df["tab_predicted_finish_pos"] = pd.to_numeric(df.get("tab_predicted_finish_pos"), errors="coerce")
+
     valid = df["xgb_correct"].notna()
+
+    # Accuracy acumulada
     df.loc[valid, "xgb_accuracy_cumul"] = df.loc[valid, "xgb_correct"].expanding().mean().round(4)
     df.loc[valid, "tab_accuracy_cumul"] = df.loc[valid, "tab_correct"].expanding().mean().round(4)
+
+    # Brier Score acumulado — mide calibración de probabilidades (cuanto más bajo, mejor)
+    # BS_i = (prob_predicha - resultado_real)²  donde resultado_real ∈ {0, 1}
+    df.loc[valid, "xgb_brier"] = (
+        (df.loc[valid, "win_prob_xgboost"] - df.loc[valid, "xgb_correct"]) ** 2
+    )
+    df.loc[valid, "tab_brier"] = (
+        (df.loc[valid, "win_prob_tabnet"] - df.loc[valid, "tab_correct"]) ** 2
+    )
+    df.loc[valid, "xgb_brier_cumul"] = df.loc[valid, "xgb_brier"].expanding().mean().round(4)
+    df.loc[valid, "tab_brier_cumul"] = df.loc[valid, "tab_brier"].expanding().mean().round(4)
+
+    # MAE posicional acumulado — posición real del piloto predicho vs posición 1 (victoria)
+    # Error_i = |posición_final_predicho - 1|  (0 = acertó, 1 = terminó 2º, etc.)
+    valid_xgb_pos = df["xgb_predicted_finish_pos"].notna()
+    valid_tab_pos = df["tab_predicted_finish_pos"].notna()
+    df.loc[valid_xgb_pos, "xgb_pos_mae_cumul"] = (
+        (df.loc[valid_xgb_pos, "xgb_predicted_finish_pos"] - 1).abs()
+        .expanding().mean().round(2)
+    )
+    df.loc[valid_tab_pos, "tab_pos_mae_cumul"] = (
+        (df.loc[valid_tab_pos, "tab_predicted_finish_pos"] - 1).abs()
+        .expanding().mean().round(2)
+    )
 
     df = df.fillna("")
 
@@ -429,5 +508,18 @@ def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
 
     ws.clear()
     ws.update([df.columns.tolist()] + df.values.tolist())
-
     logger.info("✅ model_accuracy sincronizado a Google Sheets: %d carreras.", len(df))
+
+    # Guardar también en S3 para que Athena (y Looker Studio vía Athena) lo lea
+    try:
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        _s3_client().put_object(
+            Bucket=S3_BUCKET,
+            Key=S3_MODEL_ACCURACY_KEY,
+            Body=buf.getvalue().encode("utf-8"),
+            ContentType="text/csv",
+        )
+        logger.info("✅ model_accuracy guardado en s3://%s/%s", S3_BUCKET, S3_MODEL_ACCURACY_KEY)
+    except Exception as exc:
+        logger.warning("No se pudo guardar model_accuracy en S3: %s", exc)

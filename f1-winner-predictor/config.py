@@ -63,8 +63,9 @@ MODEL_FILE     = MODELS_DIR / "xgboost_f1_winner.pkl"
 ENCODER_FILE   = MODELS_DIR / "label_encoders.pkl"
 
 # TabNet (Local)
-TABNET_MODEL_PATH = MODELS_DIR / "tabnet_model"
-SCALER_FILE       = MODELS_DIR / "scaler.pkl"
+TABNET_MODEL_PATH        = MODELS_DIR / "tabnet_model"
+SCALER_FILE              = MODELS_DIR / "scaler.pkl"
+TABNET_TEMPERATURE_FILE  = MODELS_DIR / "tabnet_temperature.pkl"  # Temperature Scaling (T >= 1)
 
 XGBOOST_PARAMS = {
     "n_estimators": 500,
@@ -94,12 +95,14 @@ LAMBDA_FUNCTION_NAME = os.environ.get("LAMBDA_FUNCTION_NAME", "f1-winner-predict
 S3_HISTORY_KEY     = "predictions/history.csv"       # historial unificado (input de Athena)
 S3_MODEL_KEY       = "models/xgboost_f1_winner.pkl"  # artefacto XGBoost para Lambda
 S3_ENCODER_KEY     = "models/label_encoders.pkl"     # encoders compartidos con Lambda
-S3_IMPORTANCE_KEY  = "metrics/feature_importance.csv"
-S3_PERFORMANCE_KEY = "metrics/historical_performance.csv"
-S3_RACE_RESULTS_KEY = "data/race_results_raw.csv"    # resultados históricos de carrera (features for Lambda)
+S3_IMPORTANCE_KEY    = "metrics/feature_importance.csv"
+S3_PERFORMANCE_KEY   = "metrics/historical_performance.csv"
+S3_MODEL_ACCURACY_KEY = "metrics/model_accuracy/model_accuracy.csv"  # métricas Brier+MAE → Athena
+S3_RACE_RESULTS_KEY  = "data/race_results_raw.csv"    # resultados históricos de carrera (features for Lambda)
 
 # ─── ATHENA (motor SQL sobre S3 → Looker Studio) ──────────────────────────────────
 ATHENA_DATABASE          = os.environ.get("ATHENA_DATABASE",          "f1_predictions")
 ATHENA_TABLE             = os.environ.get("ATHENA_TABLE",             "race_predictions")
 ATHENA_TABLE_IMPORTANCE  = os.environ.get("ATHENA_TABLE_IMPORTANCE",  "feature_importance")
+ATHENA_TABLE_ACCURACY    = os.environ.get("ATHENA_TABLE_ACCURACY",    "model_accuracy")
 ATHENA_OUTPUT_LOC        = f"s3://{S3_BUCKET}/athena-results/"

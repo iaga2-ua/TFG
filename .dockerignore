@@ -1,0 +1,9 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Modelos y datos pesados (se montan como volúmenes en docker-compose.yml)
+f1-winner-predictor/models/
+f1-winner-predictor/data/
+f1-winner-predictor/.fastf1_cache/
+f1-winner-predictor/package/

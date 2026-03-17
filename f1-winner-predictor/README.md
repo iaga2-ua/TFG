@@ -43,6 +43,7 @@ f1-winner-predictor/
 ├── config.py                  # Configuración central (paths, features, parámetros)
 ├── train.py                   # Entrenamiento XGBoost + TabNet con Optuna
 ├── predict.py                 # Inferencia TabNet local + registro de resultados
+├── predict_proba_all.py       # Probabilidades de todos los pilotos (XGBoost + TabNet, sin S3)
 ├── requirements.txt           # Dependencias del entorno local/Docker
 ├── requirements-lambda.txt    # Dependencias del contenedor Lambda
 ├── Dockerfile                 # Imagen para entrenamiento y predicción local
@@ -337,6 +338,34 @@ docker compose run --rm trainer python predict.py --round 2 --year 2026
 ```
 
 Ambas predicciones se fusionan en una única fila en S3 y se sincronizan con Google Sheets.
+
+### Después de la clasificación (sábado) — Ver probabilidades de todos los pilotos
+
+Para consultar la distribución completa de probabilidades de victoria de todos los pilotos **sin escribir nada en S3**, usa el servicio `proba`:
+
+```powershell
+docker compose run --rm proba --round 2
+docker compose run --rm proba --round 2 --year 2026
+```
+
+El script carga los modelos locales (`models/`) y muestra una tabla ordenada por probabilidad XGBoost:
+
+```
++==================================================+
+|     2026  |  Ronda 2  |  CHINESE GRAND PRIX      |
++==================================================+
+  #   PILOTO      XGBoost     TabNet
+  ----------------------------------------------------
+  1   ANT           62.6%      31.1% <--
+  2   RUS            2.6%      12.7%
+  3   LEC            1.9%       7.0%
+  4   HAM            1.9%      19.9%
+  ...
+```
+
+> Las probabilidades de cada modelo suman 100% tras normalizar las salidas del clasificador binario.
+> TabNet distingue mejor el pelotón (distribuye más probabilidad entre varios pilotos) mientras que
+> XGBoost tiende a concentrarla en el favorito claro.
 
 ### Después de la carrera (lunes) — Registrar resultado real
 

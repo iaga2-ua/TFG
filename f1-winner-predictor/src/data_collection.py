@@ -421,6 +421,25 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         "Position":     "grid_position",        # posición de clasificación (sábado)
     }, inplace=True)
 
+    # Pilotos sin tiempo de clasificación (penalización, incidente, DNS):
+    # su grid_position y quali_gap_to_pole_s son NaN.
+    # Rellenamos con valores penalizados para que el modelo no los confunda con pole.
+    n_drivers = len(results)
+    grid_nan = results["grid_position"].isna()
+    if grid_nan.any():
+        # Asignar posiciones al final de la parrilla a partir de la última válida
+        last_pos = results["grid_position"].max()
+        if np.isnan(last_pos):
+            last_pos = 0
+        for i, idx in enumerate(results.index[grid_nan], start=1):
+            results.at[idx, "grid_position"] = last_pos + i
+
+    gap_nan = results["quali_gap_to_pole_s"].isna()
+    if gap_nan.any():
+        max_gap = results["quali_gap_to_pole_s"].max()
+        max_gap = 0.0 if np.isnan(max_gap) else max_gap
+        results.loc[gap_nan, "quali_gap_to_pole_s"] = max_gap + 5.0
+
     # ── Weather ───────────────────────────────────────────────────────────────
     weather = _extract_weather_stats(session)
     for col, val in weather.items():

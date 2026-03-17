@@ -26,6 +26,7 @@ from config import (
     ENCODER_FILE,
     FASTF1_CACHE,
     MODEL_FILE,
+    PROCESSED_DIR,
     RAW_DIR,
     SCALER_FILE,
     TABNET_MODEL_PATH,
@@ -138,38 +139,53 @@ def _print_table(event_name: str, round_num: int, year: int, df: pd.DataFrame) -
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+def _load_snapshot(year: int, round_num: int) -> dict | None:
+    """Carga el snapshot guardado por predict.py el sábado, si existe."""
+    import json
+    path = PROCESSED_DIR / f"proba_snapshot_{year}_R{round_num:02d}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return None
+
+
 def run(year: int, round_num: int) -> None:
-    import fastf1
-    fastf1.Cache.enable_cache(FASTF1_CACHE)
+    snapshot = _load_snapshot(year, round_num)
 
-    print(f"\n[INFO] Obteniendo datos de clasificación: {year} Ronda {round_num} ...")
-    df_live = fetch_qualifying_snapshot(year, round_num)
-    if df_live.empty:
-        print("[ERROR] No se encontraron datos de clasificación.")
-        sys.exit(1)
+    if snapshot:
+        print(f"\n[INFO] Usando snapshot guardado el {snapshot['timestamp']}")
+        event_name = snapshot["event_name"]
+        drivers    = snapshot["drivers"]
+        xgb_probs  = np.array([snapshot["xgb_probs"].get(d, np.nan) for d in drivers])
+        tab_probs  = np.array([snapshot["tab_probs"].get(d, np.nan) for d in drivers])
+    else:
+        print("\n[AVISO] No hay snapshot del sabado — recomputando en vivo (puede diferir de la prediccion oficial).")
+        import fastf1
+        fastf1.Cache.enable_cache(FASTF1_CACHE)
 
-    event_name = df_live.iloc[0]["event_name"]
-    drivers    = df_live["driver_abbr"].tolist()
+        print(f"[INFO] Obteniendo datos de clasificacion: {year} Ronda {round_num} ...")
+        df_live = fetch_qualifying_snapshot(year, round_num)
+        if df_live.empty:
+            print("[ERROR] No se encontraron datos de clasificacion.")
+            sys.exit(1)
 
-    print("[INFO] Cargando modelos ...")
-    encoders   = _load_encoders()
-    history_df = _load_history()
+        event_name = df_live.iloc[0]["event_name"]
+        drivers    = df_live["driver_abbr"].tolist()
 
-    X = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
+        print("[INFO] Cargando modelos ...")
+        encoders   = _load_encoders()
+        history_df = _load_history()
+        X = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
 
-    # XGBoost
-    xgb_probs = np.full(len(drivers), np.nan)
-    xgb_model = _load_xgboost()
-    if xgb_model is not None:
-        xgb_probs = _xgboost_probs(xgb_model, X)
+        xgb_probs = np.full(len(drivers), np.nan)
+        xgb_model = _load_xgboost()
+        if xgb_model is not None:
+            xgb_probs = _xgboost_probs(xgb_model, X)
 
-    # TabNet
-    tab_probs = np.full(len(drivers), np.nan)
-    tab_model, scaler, temperature = _load_tabnet()
-    if tab_model is not None:
-        tab_probs = _tabnet_probs(tab_model, scaler, temperature, X.values)
+        tab_probs = np.full(len(drivers), np.nan)
+        tab_model, scaler, temperature = _load_tabnet()
+        if tab_model is not None:
+            tab_probs = _tabnet_probs(tab_model, scaler, temperature, X.values)
 
-    # Montar tabla ordenada por XGBoost (o TabNet si XGBoost no disponible)
     sort_key = xgb_probs if not np.all(np.isnan(xgb_probs)) else tab_probs
     result_df = pd.DataFrame({
         "driver":   drivers,

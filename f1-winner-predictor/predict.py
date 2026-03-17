@@ -41,7 +41,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from config import (
-    CURRENT_SEASON, ENCODER_FILE, FASTF1_CACHE, RAW_DIR,
+    CURRENT_SEASON, ENCODER_FILE, FASTF1_CACHE, MODEL_FILE, PROCESSED_DIR, RAW_DIR,
     TABNET_MODEL_PATH, SCALER_FILE, TABNET_TEMPERATURE_FILE,
 )
 from src.data_collection import fetch_qualifying_snapshot
@@ -162,6 +162,10 @@ def predict_race(
 
     _print_tabnet_winner(event_name, winner_abbr, winner_prob)
 
+    # Guardar snapshot completo de probabilidades (todos los pilotos, ambos modelos)
+    # para que predict_proba_all.py pueda reproducir exactamente la prediccion del sabado.
+    _save_proba_snapshot(year, round_num, event_name, df_live, probs_tab, encoders, history_df)
+
     if upload:
         try:
             from src.aws_utils import append_to_history_csv, sync_to_sheets
@@ -177,6 +181,61 @@ def predict_race(
             logger.info("Guardado localmente: %s", local_out)
 
     return result_row
+
+
+def _save_proba_snapshot(
+    year: int,
+    round_num: int,
+    event_name: str,
+    df_live: pd.DataFrame,
+    tab_probs: np.ndarray,
+    encoders: dict,
+    history_df: pd.DataFrame,
+) -> None:
+    """
+    Persiste el snapshot completo de probabilidades (XGBoost + TabNet) para todos
+    los pilotos en data/processed/proba_snapshot_{year}_R{round_num:02d}.json.
+    predict_proba_all.py lee este archivo para reproducir la prediccion del sabado.
+    """
+    import json
+    from src.feature_engineering import apply_features
+
+    drivers = df_live["driver_abbr"].tolist()
+
+    # XGBoost (modelo local)
+    xgb_probs_dict: dict[str, float] = {}
+    if MODEL_FILE.exists():
+        try:
+            with open(MODEL_FILE, "rb") as f:
+                xgb_model = pickle.load(f)
+            X = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
+            boosters = [cc.estimator.get_booster() for cc in xgb_model.calibrated_classifiers_]
+            saved_names = [b.feature_names for b in boosters]
+            for b in boosters:
+                b.feature_names = None
+            try:
+                raw = xgb_model.predict_proba(X.values)[:, 1]
+            finally:
+                for b, fn in zip(boosters, saved_names):
+                    b.feature_names = fn
+            s = raw.sum()
+            normed = (raw / s if s > 0 else raw).tolist()
+            xgb_probs_dict = dict(zip(drivers, normed))
+        except Exception as exc:
+            logger.warning("No se pudo calcular XGBoost para el snapshot: %s", exc)
+
+    snapshot = {
+        "year": year,
+        "round": round_num,
+        "event_name": event_name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "drivers": drivers,
+        "tab_probs": dict(zip(drivers, tab_probs.tolist())),
+        "xgb_probs": xgb_probs_dict,
+    }
+    out = PROCESSED_DIR / f"proba_snapshot_{year}_R{round_num:02d}.json"
+    out.write_text(json.dumps(snapshot, indent=2))
+    logger.info("Snapshot de probabilidades guardado: %s", out)
 
 
 def _print_tabnet_winner(event_name: str, winner: str, prob: float) -> None:

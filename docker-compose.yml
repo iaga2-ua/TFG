@@ -15,6 +15,19 @@ services:
       - ./f1-winner-predictor/.google_credentials.json:/app/.google_credentials.json:ro
     command: python predict.py --help
 
+  # ── Probabilidades de todos los pilotos (XGBoost + TabNet, sin subir a S3) ──
+  # Uso: docker compose run --rm proba --round N [--year YYYY]
+  proba:
+    build: .
+    image: f1-tabnet:latest
+    env_file:
+      - .env
+    volumes:
+      - ./f1-winner-predictor/models:/app/models
+      - ./f1-winner-predictor/data:/app/data
+      - ./f1-winner-predictor/.fastf1_cache:/app/.fastf1_cache
+    entrypoint: ["python", "predict_proba_all.py"]
+
   # ── Entrenamiento (XGBoost + TabNet) ────────────────────────────────────────
   # Uso: docker compose run trainer
   # Añadir --upload-s3 para subir los artefactos XGBoost a S3

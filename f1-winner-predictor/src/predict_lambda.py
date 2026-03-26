@@ -60,7 +60,7 @@ def _load_models():
 
     with open(model_tmp,   "rb") as f: _XGB_MODEL = pickle.load(f)
     with open(encoder_tmp, "rb") as f: _ENCODERS  = pickle.load(f)
-    logger.info("✅ Modelos cargados exitosamente en Lambda.")
+    logger.info("Modelos cargados en Lambda.")
     return _XGB_MODEL, _ENCODERS
 
 def _load_race_results() -> pd.DataFrame:

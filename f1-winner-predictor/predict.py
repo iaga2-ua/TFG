@@ -261,7 +261,7 @@ def record_actual_result(year: int, round_num: int) -> None:
     results["Position"] = pd.to_numeric(results["Position"], errors="coerce")
 
     winner = results.loc[results["Position"] == 1, "Abbreviation"].values[0]
-    logger.info(f"🏆 Ganador real: {winner}")
+    logger.info("Ganador real: %s", winner)
 
     # Obtener la posición final del piloto que cada modelo predijo,
     # para calcular MAE posicional (cuán lejos terminó del 1er puesto).

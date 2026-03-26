@@ -131,9 +131,9 @@ def upload_to_s3(local_path: Path, s3_key: str) -> None:
     """Sube cualquier archivo (como las métricas de importancia) a S3."""
     try:
         _s3_client().upload_file(str(local_path), S3_BUCKET, s3_key)
-        logger.info(f"⬆️ Archivo {local_path.name} subido a {s3_key}")
+        logger.info("Archivo %s subido a %s", local_path.name, s3_key)
     except Exception as e:
-        logger.error(f"❌ Error subiendo a S3: {e}")
+        logger.error("Error subiendo a S3: %s", e)
 
 # ─── MODELOS Y ARTEFACTOS ────────────────────────────────────────────────────
 
@@ -365,7 +365,7 @@ def sync_to_sheets(credentials_path: str = None) -> None:
     worksheet.clear()
     worksheet.update([df.columns.tolist()] + df.values.tolist())
 
-    logger.info("✅ Google Sheets sincronizado: %d filas.", len(df))
+    logger.info("Google Sheets sincronizado: %d filas.", len(df))
 
 
 def sync_feature_importance_to_sheets(credentials_path: str = None) -> None:
@@ -418,7 +418,7 @@ def sync_feature_importance_to_sheets(credentials_path: str = None) -> None:
     ws.clear()
     ws.update([df.columns.tolist()] + df.values.tolist())
 
-    logger.info("✅ feature_importance sincronizado a Google Sheets: %d features.", len(df))
+    logger.info("feature_importance sincronizado a Google Sheets: %d features.", len(df))
 
 
 def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
@@ -508,7 +508,7 @@ def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
 
     ws.clear()
     ws.update([df.columns.tolist()] + df.values.tolist())
-    logger.info("✅ model_accuracy sincronizado a Google Sheets: %d carreras.", len(df))
+    logger.info("model_accuracy sincronizado a Google Sheets: %d carreras.", len(df))
 
     # Guardar también en S3 para que Athena (y Looker Studio vía Athena) lo lea
     try:
@@ -520,6 +520,6 @@ def sync_model_accuracy_to_sheets(credentials_path: str = None) -> None:
             Body=buf.getvalue().encode("utf-8"),
             ContentType="text/csv",
         )
-        logger.info("✅ model_accuracy guardado en s3://%s/%s", S3_BUCKET, S3_MODEL_ACCURACY_KEY)
+        logger.info("model_accuracy guardado en s3://%s/%s", S3_BUCKET, S3_MODEL_ACCURACY_KEY)
     except Exception as exc:
         logger.warning("No se pudo guardar model_accuracy en S3: %s", exc)

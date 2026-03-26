@@ -98,7 +98,7 @@ def _fit_temperature(
 
     optimizer.step(_closure)
     T_opt = float(T.item())
-    logger.info("🌡️  Temperature Scaling TabNet: T = %.4f", T_opt)
+    logger.info("Temperature Scaling TabNet: T = %.4f", T_opt)
     return T_opt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -111,9 +111,9 @@ def load_or_fetch_raw(refresh: bool = False) -> pd.DataFrame:
     """Carga el CSV histórico local; si no existe o se pide refresh, lo descarga de FastF1."""
     raw_path = RAW_DIR / "race_results_raw.csv"
     if raw_path.exists() and not refresh:
-        logger.info(f"📂 Cargando datos crudos desde {raw_path}")
+        logger.info("Cargando datos crudos desde %s", raw_path)
         return pd.read_csv(raw_path)
-    logger.info("📡 Descargando datos de FastF1 (temporadas %s)...", TRAIN_SEASONS)
+    logger.info("Descargando datos de FastF1 (temporadas %s)...", TRAIN_SEASONS)
     return collect_all_seasons(seasons=TRAIN_SEASONS, save=True)
 
 
@@ -203,11 +203,11 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
     # 2. XGBoost — inferencia en AWS Lambda
     if model in ("xgboost", "all"):
         if optimize:
-            logger.info(f"🔍 Optimizando XGBoost ({n_trials} trials de Optuna)...")
+            logger.info("Optimizando XGBoost (%d trials de Optuna)...", n_trials)
             xgb_params = optimize_xgboost(X.values, y.values, n_trials)
         else:
             xgb_params = XGBOOST_PARAMS
-        logger.info(f"🌲 Entrenando XGBoost ({len(X)} filas, {X.shape[1]} features)...")
+        logger.info("Entrenando XGBoost (%d filas, %d features)...", len(X), X.shape[1])
         # Platt scaling (sigmoid) con cv=5 para suavizar la confianza extrema
         # de los clasificadores binarios independientes por piloto.
         # CalibratedClassifierCV(cv=5) usa validacion cruzada para calibrar,
@@ -224,7 +224,7 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
 
     if model in ("tabnet", "all"):
         if optimize:
-            logger.info(f"🔍 Optimizando TabNet ({n_trials} trials de Optuna)...")
+            logger.info("Optimizando TabNet (%d trials de Optuna)...", n_trials)
             best_tab  = optimize_tabnet(X_scaled, y.values, n_trials)
             tab_lr    = best_tab.pop("lr")
             tab_batch = best_tab.pop("batch_size")
@@ -246,7 +246,7 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
                 scheduler_params={"step_size": 10, "gamma": 0.9},
                 mask_type="entmax",
             )
-        logger.info("🧠 Entrenando TabNet (inferencia local)...")
+        logger.info("Entrenando TabNet (inferencia local)...")
         # Reservar 20% para calibración de temperatura; TabNet se entrena en el 80%
         X_tab_train, X_tab_cal, y_tab_train, y_tab_cal = train_test_split(
             X_scaled, y.values, test_size=0.2, random_state=42, stratify=y.values
@@ -273,20 +273,20 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         return np.mean(imps, axis=0)
 
     if xgb_model is not None and tab_model is not None:
-        logger.info("📊 Calculando importancia de variables (ambos modelos)...")
+        logger.info("Calculando importancia de variables (ambos modelos)...")
         importance_df = pd.DataFrame({
             "feature":             FEATURE_COLS,
             "importance_xgboost":  _xgb_importances(xgb_model),
             "importance_tabnet":   tab_model.feature_importances_,
         }).sort_values("importance_xgboost", ascending=False)
     elif xgb_model is not None:
-        logger.info("📊 Calculando importancia de variables (XGBoost)...")
+        logger.info("Calculando importancia de variables (XGBoost)...")
         importance_df = pd.DataFrame({
             "feature":             FEATURE_COLS,
             "importance_xgboost":  _xgb_importances(xgb_model),
         }).sort_values("importance_xgboost", ascending=False)
     elif tab_model is not None:
-        logger.info("📊 Calculando importancia de variables (TabNet)...")
+        logger.info("Calculando importancia de variables (TabNet)...")
         importance_df = pd.DataFrame({
             "feature":             FEATURE_COLS,
             "importance_tabnet":   tab_model.feature_importances_,
@@ -336,21 +336,21 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         logger.info(f"   Comparativa historica guardada -> {comp_path}")
 
     # 5. Guardar artefactos locales
-    logger.info("💾 Guardando artefactos en /models ...")
+    logger.info("Guardando artefactos en /models ...")
     if xgb_model is not None:
         with open(MODEL_FILE,   "wb") as f: pickle.dump(xgb_model, f)
         with open(ENCODER_FILE, "wb") as f: pickle.dump(encoders,  f)
-        logger.info("   ✅ XGBoost + encoders guardados.")
+        logger.info("   XGBoost + encoders guardados.")
     if tab_model is not None:
         with open(SCALER_FILE, "wb") as f: pickle.dump(scaler, f)
         with open(TABNET_TEMPERATURE_FILE, "wb") as f: pickle.dump(tab_temperature, f)
         tab_model.save_model(str(TABNET_FILE))   # genera tabnet_model.zip
-        logger.info("   ✅ TabNet + Scaler + temperatura guardados (solo local).")
+        logger.info("   TabNet + Scaler + temperatura guardados (solo local).")
 
     # 6. Subir artefactos XGBoost a S3 → disponible para AWS Lambda
     if upload_s3:
         if xgb_model is None:
-            logger.warning("⚠️  --upload-s3 ignorado: XGBoost no fue entrenado en esta ejecución.")
+            logger.warning("--upload-s3 ignorado: XGBoost no fue entrenado en esta ejecucion.")
         else:
             try:
                 from src.aws_utils import upload_model_artefacts, upload_to_s3, sync_feature_importance_to_sheets
@@ -360,9 +360,9 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
                     sync_feature_importance_to_sheets()
                 if xgb_model is not None and tab_model is not None:
                     upload_to_s3(comp_path, "metrics/historical_performance.csv")
-                logger.info("🚀 Artefactos XGBoost subidos a S3 → listos para Lambda.")
+                logger.info("Artefactos XGBoost subidos a S3 → listos para Lambda.")
             except Exception as exc:
-                logger.error(f"❌ Error al subir a S3: {exc}")
+                logger.error("Error al subir a S3: %s", exc)
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────

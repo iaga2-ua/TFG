@@ -24,7 +24,6 @@ for _dir in [RAW_DIR, PROCESSED_DIR, MODELS_DIR, CACHE_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)
 
 # ─── SEASONS ─────────────────────────────────────────────────────────────────
-# Recomendación: Incluir 2023 si tienes los datos para dar más volumen a TabNet
 TRAIN_SEASONS   = [2023, 2024, 2025, 2026]   # 2026: solo carreras ya disputadas
 CURRENT_SEASON  = 2026
 

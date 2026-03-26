@@ -147,7 +147,7 @@ def fetch_practice_pace(year: int, round_num: int) -> pd.DataFrame:
             pace_frames.append(gap)
 
         except Exception as exc:
-            logger.debug(f"  ℹ  {year} R{round_num} {session_name} not available: {exc}")
+            logger.debug("  %d R%d %s not available: %s", year, round_num, session_name, exc)
             pace_frames.append(pd.DataFrame(columns=["driver_abbr", col_out]))
 
     # Sprint weekend fallback: FP2/FP3 do not exist (schedule: FP1 → SQ → S → Q).
@@ -155,8 +155,8 @@ def fetch_practice_pace(year: int, round_num: int) -> pd.DataFrame:
     # receives real pace data instead of all-zero placeholders after fillna(0).
     if len(pace_frames[0]) == 0 and len(pace_frames[1]) == 0:
         logger.info(
-            f"  ⚡ {year} R{round_num}: sprint weekend detected — "
-            "falling back to FP1 for practice pace features"
+            "  %d R%d: sprint weekend detected — falling back to FP1 for practice pace features",
+            year, round_num,
         )
         try:
             sess_fp1 = fastf1.get_session(year, round_num, "FP1")
@@ -215,14 +215,14 @@ def fetch_season_results(year: int) -> pd.DataFrame:
             session_quali = fastf1.get_session(year, round_num, "Q")
             session_quali.load(laps=False, telemetry=False, weather=True, messages=False)
         except Exception as exc:
-            logger.warning(f"  ⚠  {year} R{round_num} ({event_name}): {exc}")
+            logger.warning("  %d R%d (%s): %s", year, round_num, event_name, exc)
             continue
 
         race_results  = session_race.results
         quali_results = session_quali.results
 
         if race_results is None or race_results.empty:
-            logger.warning(f"  ⚠  {year} R{round_num}: empty race results, skipping.")
+            logger.warning("  %d R%d: empty race results, skipping.", year, round_num)
             continue
 
         # Circuit metadata from FastF1 (dynamic + static fields)
@@ -255,8 +255,8 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                         if pd.notna(pos_s):
                             sprint_position_lookup[abbr_s] = float(pos_s)
                 logger.info(
-                    f"  🏎  {year} R{round_num}: sprint race — "
-                    f"sprint points + positions added for {len(sprint_points_lookup)} drivers"
+                    "  %d R%d: sprint race — sprint points + positions added for %d drivers",
+                    year, round_num, len(sprint_points_lookup),
                 )
         except Exception:
             pass  # Not a sprint weekend
@@ -315,8 +315,10 @@ def fetch_season_results(year: int) -> pd.DataFrame:
                 "avg_safety_car_prob":      circuit_meta["avg_safety_car_prob"],
             })
 
-        logger.info(f"  ✓  {year} R{round_num}: {event_name} — {len(merged)} drivers"
-                    f"  🌧 rain={weather['rain_probability']:.0%}")
+        logger.info(
+            "  %d R%d: %s — %d drivers  rain=%.0f%%",
+            year, round_num, event_name, len(merged), weather["rain_probability"] * 100,
+        )
 
     df = pd.DataFrame(rows)
     return df
@@ -357,7 +359,7 @@ def collect_all_seasons(seasons: list[int] | None = None, save: bool = True) -> 
 
     all_dfs = []
     for year in seasons:
-        logger.info(f"📅 Fetching season {year}...")
+        logger.info("Fetching season %d...", year)
         df_year = fetch_season_results(year)
         all_dfs.append(df_year)
 
@@ -371,7 +373,7 @@ def collect_all_seasons(seasons: list[int] | None = None, save: bool = True) -> 
     if save:
         out_path = RAW_DIR / "race_results_raw.csv"
         combined.to_csv(out_path, index=False)
-        logger.info(f"💾 Saved {len(combined)} rows → {out_path}")
+        logger.info("Saved %d rows → %s", len(combined), out_path)
 
     return combined
 
@@ -446,7 +448,7 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
         results[col] = val
 
     logger.info(
-        f"🌡  Qualifying weather — "
+        f"Qualifying weather — "
         f"Rain: {weather['rain_probability']:.0%}  "
         f"Track: {weather['track_temp_c']:.1f}°C  "
         f"Humidity: {weather['humidity_pct']:.1f}%  "
@@ -476,8 +478,8 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
                 if abbr_s and pd.notna(pos_s):
                     sprint_position_lookup[abbr_s] = float(pos_s)
             logger.info(
-                f"🏎  Sprint Race R{round_num}: posiciones cargadas "
-                f"para {len(sprint_position_lookup)} pilotos"
+                "Sprint Race R%d: posiciones cargadas para %d pilotos",
+                round_num, len(sprint_position_lookup),
             )
     except Exception:
         pass  # GP normal sin sprint
@@ -495,7 +497,7 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
     results["drs_zones"]           = circuit_meta["drs_zones"]
     results["avg_safety_car_prob"] = circuit_meta["avg_safety_car_prob"]
     logger.info(
-        f"📐 Circuito: {circuit_meta['location']} — "
+        f"Circuito: {circuit_meta['location']} — "
         f"{circuit_meta['track_length_km']:.3f} km, "
         f"{circuit_meta['corner_count']} curvas, "
         f"{circuit_meta['drs_zones']} zonas DRS"
@@ -523,7 +525,7 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
     # sesión aún no se ha disputado → no hay datos reales de quali.
     if df["grid_position"].isna().all():
         logger.warning(
-            "⚠️  %d R%d (%s): grid_position es todo NaN — "
+            "%d R%d (%s): grid_position es todo NaN — "
             "la clasificación aún no se ha disputado o los datos no están disponibles.",
             year, round_num, event_name,
         )
@@ -531,30 +533,6 @@ def fetch_qualifying_snapshot(year: int, round_num: int) -> pd.DataFrame:
 
     return df
 
-
-def fetch_live_data_2026(year: int, round_num: int) -> pd.DataFrame:
-    """
-    Versión optimizada para el flujo de 2026.
-    Captura el snapshot y prepara las columnas exactas que esperan 
-    nuestros dos modelos (XGBoost y TabNet).
-    """
-    logger.info(f"🏎️ Generando snapshot en vivo para {year} R{round_num}...")
-    
-    df_live = fetch_qualifying_snapshot(year, round_num)
-    
-    # Verificación de integridad para 2026
-    driver_count = len(df_live)
-    if driver_count != 22:
-        logger.warning(f"Se detectaron {driver_count} pilotos. Para 2026 se esperan 22.")
-    
-    # Rellenar nans en gaps de práctica (si un piloto no rodó) 
-    # con un valor penalizado (ej. el peor tiempo + 0.5s)
-    for col in ["fp2_long_run_pace_gap_s", "fp3_gap_to_best_s", "quali_gap_to_pole_s"]:
-        if df_live[col].isnull().any():
-            max_val = df_live[col].max()
-            df_live[col] = df_live[col].fillna(max_val + 0.5)
-            
-    return df_live
 
 if __name__ == "__main__":
     df = collect_all_seasons()

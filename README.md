@@ -253,9 +253,9 @@ Columnas: `xgb_brier`, `xgb_brier_cumul`, `tab_brier`, `tab_brier_cumul`.
 
 Mide **cuántas posiciones se equivocó** el modelo respecto al 1er puesto. Si el modelo predijo a VER y VER terminó P5, el error es 4. Si acertó el ganador, el error es 0:
 
-$$\text{MAE}_{\text{pos}} = \frac{1}{N}\sum_{i=1}^{N}|\text{pos\_final}_i - 1|$$
+$$\text{MAE}_{\text{pos}} = \frac{1}{N}\sum_{i=1}^{N}|f_i - 1|$$
 
-Donde $\text{pos\_final}_i$ es la posición en carrera del piloto que el modelo predijo como ganador.
+Donde $f_i$ es la posición en carrera del piloto que el modelo predijo como ganador.
 
 **Cómo se obtiene** (`predict.py → record_actual_result`): al registrar el resultado real, FastF1 descarga la clasificación de carrera y busca en qué posición terminó el piloto predicho por cada modelo. Ese dato se guarda en `xgb_predicted_finish_pos` / `tab_predicted_finish_pos` dentro de `history.csv`.
 

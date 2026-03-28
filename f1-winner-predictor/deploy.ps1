@@ -180,6 +180,8 @@ if ($Mode -eq "predict") {
     Push-Location $ProjectDir
     docker compose run --rm `
         -v "${ScriptDir}/predict.py:/app/predict.py" `
+        -v "${ScriptDir}/config.py:/app/config.py" `
+        -v "${ScriptDir}/src/feature_engineering.py:/app/src/feature_engineering.py" `
         -v "${ScriptDir}/src/predict_lambda.py:/app/src/predict_lambda.py" `
         trainer python predict.py @predictArgs | Tee-Object -FilePath $tabOutputFile
     $LASTEXITCODE_TAB = $LASTEXITCODE

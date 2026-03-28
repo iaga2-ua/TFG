@@ -65,7 +65,7 @@ f1-winner-predictor/
 
 ---
 
-## Features utilizadas (26 variables)
+## Features utilizadas (28 variables)
 
 | Categoría | Feature | Descripción |
 |---|---|---|
@@ -82,7 +82,9 @@ f1-winner-predictor/
 | **Historial piloto** | `driver_avg_finish_l3` | Media de posición final en las últimas 3 carreras |
 | **Historial piloto** | `driver_win_rate_l5` | Tasa de victorias en las últimas 5 carreras |
 | **Historial piloto** | `driver_wet_win_rate` | Tasa de victorias en carreras mojadas (últimas 10) |
-| **Historial circuito** | `driver_best_finish_circuit`, `driver_avg_finish_circuit` | Mejor y media de resultado en este circuito |
+| **Historial piloto** | `driver_current_season_win_rate` | Tasa de victorias en la temporada actual. Evita sesgo por dominancia histórica de un piloto en temporadas anteriores |
+| **Historial piloto** | `driver_races_since_last_win` | Carreras desde la última victoria (máximo 50). Penaliza a pilotos que no ganan hace tiempo |
+| **Historial circuito** | `driver_best_finish_circuit`, `driver_avg_finish_circuit` | Mejor y media de resultado en este circuito en los **últimos 3 años** (se excluye el histórico más antiguo para evitar que victorias obsoletas distorsionen la predicción) |
 | **Circuito (FastF1)** | `track_length_km`, `corner_count` | Longitud y número de curvas (dinámico) |
 | **Circuito (estático)** | `overtake_difficulty`, `drs_zones`, `avg_safety_car_prob` | Dificultad de adelantamiento, zonas DRS, probabilidad histórica de SC |
 | **Contexto** | `race_number` | Número de ronda en la temporada |
@@ -94,51 +96,31 @@ f1-winner-predictor/
 
 ### XGBoost (nube — AWS Lambda)
 - Clasificador binario (`is_winner = 1` para el ganador de cada carrera)
-- `scale_pos_weight = 21` para compensar el desbalance (1 ganador vs 21 pilotos)
+- `scale_pos_weight = 5`: corrección parcial del desbalance. El valor completo (21) sobreconcentra las probabilidades en el favorito; con 5 el modelo mantiene spread real entre los pilotos de cabeza.
+- `base_score = 0.045` (= 1/22): prior natural de victoria. El default de XGBoost (0.5) inflaba artificialmente las estimaciones de pilotos con pocos datos.
 - Hiperparámetros optimizados con **Optuna** (ROC-AUC, 5-fold CV estratificado)
-- Entrenado con datos 2023–2026 (solo carreras ya disputadas)
-- Artefactos en S3: `models/xgboost_f1_winner.pkl` + `models/label_encoders.pkl`
+- Entrenado con datos 2023–2026 con **pesos de recencia** `{2023:1, 2024:1, 2025:2, 2026:2}` mediante `sample_weight`
+- Artefactos en S3: `models/xgboost_f1_winner.pkl` + `models/label_encoders.pkl` + `models/xgb_temperature.pkl`
 
-#### Calibración de probabilidades (Platt scaling)
+#### Calibración de probabilidades (Temperature Scaling)
 
-XGBoost predice cada piloto como un clasificador binario independiente: "¿gana sí/no?". Esto genera dos problemas al mostrar las probabilidades de victoria:
+XGBoost predice cada piloto como un clasificador binario independiente. Esto genera dos problemas:
 
-1. **Confianza extrema**: XGBoost tiende a dar probabilidades brutas muy cercanas a 0 o 1 (ej. 96% para el poleman), muy superiores a la frecuencia real de victorias desde pole (~40–45%).
-2. **No suman 1**: Las probabilidades de los 22 clasificadores independientes no tienen por qué sumar 100%.
+1. **Confianza extrema**: sin calibración, el poleman puede recibir ~90–99%, muy por encima de la frecuencia real de victorias desde pole (~40–45%).
+2. **No suman 1**: las probabilidades de los 22 clasificadores no tienen por qué sumar 100%.
 
-**Normalización** (aplicada en `predict_lambda.py` y `predict.py`): tras `predict_proba`, las probabilidades se dividen entre su suma para que sean interpretables como cuota relativa de victoria entre los pilotos en liza.
+**Temperature Scaling** (`train.py → _fit_temperature`): XGBoost se entrena con el **80%** de los datos. Con el **20% restante** se minimiza la NLL para encontrar el $T$ óptimo, que se guarda en `models/xgb_temperature.pkl`.
 
-**Platt scaling** (`CalibratedClassifierCV`, aplicado en `train.py`): resuelve la confianza extrema ajustando una regresión logística sigmoide sobre las salidas del XGBoost base. El modelo calibrado aprende dos parámetros $A$ y $B$ que mapean la probabilidad bruta $s$ a una probabilidad calibrada $p$:
+Al predecir (`predict_lambda.py`, `predict.py`, `predict_proba_all.py`), se extraen los logits ($z = \log\frac{p}{1-p}$), se dividen entre $T$, se pasa por sigmoid y finalmente se normaliza entre los $N$ pilotos:
 
-$$p_{\text{cal}} = \frac{1}{1 + e^{-(A \cdot s + B)}}$$
-
-El parámetro $A$ escala la pendiente (reduce la sobreconfianza cuando $|A| < 1$) y $B$ corrige el sesgo sistemático. Gracias a estos dos grados de libertad, Platt scaling puede corregir tanto la magnitud de las probabilidades como un desplazamiento global del modelo.
-
-**Implementación con validación cruzada** (`cv=5`): para evitar sobreajuste, se usan 5 folds. En cada fold, XGBoost se entrena en 4 partes; sus predicciones sobre la parte restante (que el modelo no vio) alimentan la regresión logística. Al predecir, se promedian las salidas de los 5 pares $(A_k, B_k)$.
-
-**Diferencia con Temperature Scaling** (usado en TabNet):
-
-| | Platt Scaling (XGBoost) | Temperature Scaling (TabNet) |
-|---|---|---|
-| Parámetros | $A$ y $B$ (2 params) | Solo $T$ (1 param) |
-| Puede cambiar el ranking | Sí ($A \neq 1$ altera el orden) | No (el argmax es idéntico) |
-| Corrige sesgo global | Sí (con $B$) | No |
-| Riesgo de sobreajuste | Mayor con pocos datos | Menor |
-
-Se usa Platt en XGBoost porque sus dos grados de libertad corrigen también el sesgo del modelo. Se usa Temperature Scaling en TabNet porque con ~50 muestras de calibración ajustar solo $T$ es más robusto.
-
-| Ejemplo (GP China 2026, ANT desde pole) | Sin calibrar | Calibrado |
-|---|---|---|
-| Probabilidad bruta → normalizada | 96.9% | 61.9% |
-| Interpretación | Imposiblemente alta | Razonable (pole + 0.0s gap) |
-
-El modelo guardado en S3 (`xgboost_f1_winner.pkl`) es directamente el `CalibratedClassifierCV`, que expone la misma interfaz `predict_proba` que el XGBoost base — Lambda no necesita ningún cambio.
+$$p_{\text{cal}} = \frac{1}{1 + e^{-z/T}}, \quad p_{\text{norm}} = \frac{p_{\text{cal}}}{\sum_i p_{\text{cal},i}}$$
 
 ### TabNet (local)
 - Red neuronal tabular con mecanismo de atención (pytorch-tabnet)
 - Mismos datos y features que XGBoost
 - Estandarización previa con `StandardScaler`
 - Hiperparámetros optimizados con **Optuna** (ROC-AUC, validación 20%)
+- Entrenado con **oversampling por recencia** `{2023:1, 2024:1, 2025:2, 2026:2}`: las filas de temporadas recientes se duplican en el conjunto de entrenamiento. TabNet no acepta `sample_weight` directamente; duplicar filas es equivalente.
 - Artefactos en local: `models/tabnet_model.zip` + `models/scaler.pkl` + `models/tabnet_temperature.pkl`
 
 #### Calibración de probabilidades (Temperature Scaling)
@@ -155,12 +137,9 @@ $$p_{\text{cal}} = \sigma\!\left(\frac{z}{T}\right) = \frac{1}{1 + e^{-z/T}}$$
 
 **Cómo se aprende $T$** (`train.py → _fit_temperature`): TabNet se entrena con el **80%** de los datos. Con el **20% restante** (set de calibración) se minimiza la NLL (*Negative Log-Likelihood*) con L-BFGS para encontrar el $T$ óptimo. El resultado se guarda en `models/tabnet_temperature.pkl`.
 
-**Cómo se aplica** (`predict.py → predict_race`): al predecir, se extraen los logits de las probabilidades brutas de TabNet ($z = \log\frac{p}{1-p}$), se dividen entre $T$ y se pasa por sigmoid. Si el archivo de temperatura no existe (modelo antiguo), se usa $T = 1.0$ con un aviso.
+El mismo mecanismo se aplica a **XGBoost** (`models/xgb_temperature.pkl`) con el mismo esquema 80/20 y la misma función `_fit_temperature`.
 
-| Ejemplo | Sin calibrar | Con Temperature Scaling ($T > 1$) |
-|---|---|---|
-| Probabilidad bruta TabNet | ~95% | ~60–70% |
-| Interpretación | Sobreconfianza severa | Más próxima a la frecuencia real |
+**Cómo se aplica**: al predecir, se extraen los logits de las probabilidades brutas ($z = \log\frac{p}{1-p}$), se dividen entre $T$ y se pasa por sigmoid. Si el archivo de temperatura no existe, se usa $T = 1.0$ con un aviso.
 
 > **Razón del diseño dual**: TabNet requiere PyTorch (~1 GB de dependencias), incompatible con los límites prácticos de AWS Lambda. XGBoost es ligero (~50 MB) y se despliega sin problemas. Correr ambos modelos permite comparar sus predicciones directamente.
 
@@ -184,7 +163,9 @@ f1-winner-predictor-2026/
 │   └── history.csv              # Una fila por carrera (XGB + TabNet fusionados)
 ├── models/
 │   ├── xgboost_f1_winner.pkl
-│   └── label_encoders.pkl
+│   ├── label_encoders.pkl
+│   ├── xgb_temperature.pkl      # Temperature Scaling para XGBoost
+│   └── tabnet_temperature.pkl   # Temperature Scaling para TabNet
 ├── metrics/
 │   ├── feature_importance.csv   # Importancia de features por modelo
 │   └── historical_performance.csv  # Predicciones vs resultados (datos de entrenamiento)
@@ -344,28 +325,28 @@ Ambas predicciones se fusionan en una única fila en S3 y se sincronizan con Goo
 Para consultar la distribución completa de probabilidades de victoria de todos los pilotos **sin escribir nada en S3**, usa el servicio `proba`:
 
 ```powershell
-docker compose run --rm proba --round 2
-docker compose run --rm proba --round 2 --year 2026
+docker compose run --rm proba --round 3
+docker compose run --rm proba --round 3 --year 2026
 ```
 
-El script carga los modelos locales (`models/`) y muestra una tabla ordenada por probabilidad XGBoost:
+El script carga los modelos locales (`models/`) y muestra una tabla ordenada por probabilidad XGBoost. La tabla se guarda automáticamente en `data/processed/proba_table_{year}_R{round:02d}.csv`:
 
 ```
 +==================================================+
-|     2026  |  Ronda 2  |  CHINESE GRAND PRIX      |
+|      2026  |  Ronda 3  |  JAPANESE GRAND PRIX    |
 +==================================================+
   #   PILOTO      XGBoost     TabNet
   ----------------------------------------------------
-  1   ANT           62.6%      31.1% <--
-  2   RUS            2.6%      12.7%
-  3   LEC            1.9%       7.0%
-  4   HAM            1.9%      19.9%
+  1   ANT           60.0%      50.0% <--
+  2   RUS           21.1%      47.6%
+  3   PIA            4.2%       0.7%
+  4   HAM            2.3%       0.2%
+  5   VER            2.1%       0.0%
   ...
+[INFO] Tabla guardada en: data/processed/proba_table_2026_R03.csv
 ```
 
-> Las probabilidades de cada modelo suman 100% tras normalizar las salidas del clasificador binario.
-> TabNet distingue mejor el pelotón (distribuye más probabilidad entre varios pilotos) mientras que
-> XGBoost tiende a concentrarla en el favorito claro.
+> Las probabilidades de cada modelo suman 100% tras normalizar las salidas del clasificador binario. TabNet distribuye más probabilidad entre varios pilotos mientras que XGBoost tiende a concentrarla más en el favorito.
 
 ### Después de la carrera (lunes) — Registrar resultado real
 
@@ -385,13 +366,14 @@ Esto:
 
 ## Despliegue (`deploy.ps1`)
 
-El script `deploy.ps1` automatiza todo el pipeline de despliegue. Acepta tres modos:
+El script `deploy.ps1` automatiza todo el pipeline de despliegue. Acepta cuatro modos:
 
 | Modo | Qué hace |
 |---|---|
 | `models` | Reentrena XGBoost + TabNet y sube artefactos a S3 (sin tocar Lambda) |
 | `lambda` | Rebuild imagen Docker → push ECR → update función Lambda (sin reentrenar) |
-| `all` | Todo lo anterior en orden |
+| `predict` | Invoca Lambda (XGBoost) + ejecuta TabNet local, genera snapshot y CSV de probabilidades |
+| `all` | `models` + `lambda` + `predict` en orden |
 
 ```powershell
 # Solo redesplegar Lambda (código cambiado, modelo no):

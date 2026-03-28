@@ -49,6 +49,9 @@ models/*.zip
 # Local test responses
 response.json
 
+# Diario del proyecto
+../diario.md
+
 # Google credentials 
 .google_credentials.json
 

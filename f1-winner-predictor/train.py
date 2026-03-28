@@ -30,7 +30,6 @@ import optuna
 import pandas as pd
 import torch
 from pytorch_tabnet.tab_model import TabNetClassifier
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -44,7 +43,7 @@ sys.path.insert(0, str(ROOT))
 from config import (
     ENCODER_FILE, FEATURE_COLS, MODEL_FILE, OPTUNA_N_TRIALS,
     PROCESSED_DIR, RAW_DIR, TRAIN_SEASONS, XGBOOST_PARAMS,
-    TABNET_TEMPERATURE_FILE,
+    TABNET_TEMPERATURE_FILE, XGB_TEMPERATURE_FILE,
 )
 from src.data_collection import collect_all_seasons
 from src.feature_engineering import build_features
@@ -168,6 +167,7 @@ def optimize_tabnet(X_scaled: np.ndarray, y: np.ndarray, n_trials: int) -> dict:
             scheduler_fn=torch.optim.lr_scheduler.StepLR,
             scheduler_params={"step_size": 10, "gamma": 0.9},
             mask_type="entmax",
+            seed=42,
             verbose=0,
         )
         clf.fit(
@@ -178,7 +178,7 @@ def optimize_tabnet(X_scaled: np.ndarray, y: np.ndarray, n_trials: int) -> dict:
             batch_size=batch_size,
             virtual_batch_size=min(batch_size // 4, 128),
             num_workers=0,
-            drop_last=False,
+            drop_last=True,
         )
         proba = clf.predict_proba(X_val)[:, 1]
         return float(roc_auc_score(y_val, proba))
@@ -188,6 +188,27 @@ def optimize_tabnet(X_scaled: np.ndarray, y: np.ndarray, n_trials: int) -> dict:
     logger.info(f"   Mejor ROC-AUC TabNet (Optuna): {study.best_value:.4f}")
     logger.info(f"   Mejores params TabNet: {study.best_params}")
     return study.best_params
+
+
+# ─── Pesos de temporada (recency weighting) ──────────────────────────────────
+
+# Las carreras recientes pesan marginalmente más para XGBoost.
+# Nota: las features driver_current_season_win_rate y driver_races_since_last_win
+# ya capturan la señal temporal — los pesos solo dan un leve empuje adicional.
+_YEAR_WEIGHTS = {2023: 1, 2024: 1, 2025: 2, 2026: 2}
+
+def _recency_sample_weights(years: np.ndarray) -> np.ndarray:
+    """Devuelve un array float de pesos normalizados por temporada."""
+    w = np.array([_YEAR_WEIGHTS.get(int(y), 1) for y in years], dtype=float)
+    return w / w.mean()
+
+def _oversample_by_year(X: np.ndarray, y: np.ndarray, years: np.ndarray):
+    """Repite filas de años recientes según _YEAR_WEIGHTS para TabNet (no soporta sample_weight)."""
+    idx = []
+    for i, yr in enumerate(years):
+        idx.extend([i] * _YEAR_WEIGHTS.get(int(yr), 1))
+    idx = np.array(idx)
+    return X[idx], y[idx]
 
 
 # ─── Entrenamiento ────────────────────────────────────────────────────────────
@@ -208,14 +229,17 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
         else:
             xgb_params = XGBOOST_PARAMS
         logger.info("Entrenando XGBoost (%d filas, %d features)...", len(X), X.shape[1])
-        # Platt scaling (sigmoid) con cv=5 para suavizar la confianza extrema
-        # de los clasificadores binarios independientes por piloto.
-        # CalibratedClassifierCV(cv=5) usa validacion cruzada para calibrar,
-        # entrenando 5 modelos base y promediando sus probabilidades calibradas.
-        xgb_base = XGBClassifier(**xgb_params)
-        xgb_model = CalibratedClassifierCV(xgb_base, cv=5, method="sigmoid")
-        xgb_model.fit(X, y)
-        logger.info("   XGBoost calibrado (Platt scaling, cv=5) listo.")
+        xgb_model = XGBClassifier(**xgb_params)
+        sample_weights_xgb = _recency_sample_weights(_ctx["year"].values)
+        # Reservar 20% para Temperature Scaling (mismo principio que TabNet)
+        X_xgb_train, X_xgb_cal, y_xgb_train, y_xgb_cal, sw_train, _ = train_test_split(
+            X.values, y.values, sample_weights_xgb,
+            test_size=0.2, random_state=42, stratify=y.values
+        )
+        xgb_model.fit(X_xgb_train, y_xgb_train, sample_weight=sw_train)
+        xgb_temperature = _fit_temperature(xgb_model, X_xgb_cal, y_xgb_cal)
+        with open(XGB_TEMPERATURE_FILE, "wb") as f: pickle.dump(xgb_temperature, f)
+        logger.info("   XGBoost listo (T=%.4f, scale_pos_weight=%s).", xgb_temperature, xgb_params.get("scale_pos_weight", 1))
 
     # 3. TabNet — inferencia solo en local
     scaler = StandardScaler()
@@ -235,6 +259,7 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
                 scheduler_fn=torch.optim.lr_scheduler.StepLR,
                 scheduler_params={"step_size": 10, "gamma": 0.9},
                 mask_type="entmax",
+                seed=42,
                 **best_tab,
             )
         else:
@@ -245,12 +270,17 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
                 scheduler_fn=torch.optim.lr_scheduler.StepLR,
                 scheduler_params={"step_size": 10, "gamma": 0.9},
                 mask_type="entmax",
+                seed=42,
             )
         logger.info("Entrenando TabNet (inferencia local)...")
         # Reservar 20% para calibración de temperatura; TabNet se entrena en el 80%
-        X_tab_train, X_tab_cal, y_tab_train, y_tab_cal = train_test_split(
-            X_scaled, y.values, test_size=0.2, random_state=42, stratify=y.values
+        years_all = _ctx["year"].values
+        X_tab_train, X_tab_cal, y_tab_train, y_tab_cal, years_tab_train, _ = train_test_split(
+            X_scaled, y.values, years_all, test_size=0.2, random_state=42, stratify=y.values
         )
+        # Oversampling con pesos de recencia (1:1:2:2) — mismo esquema que XGBoost.
+        # TabNet no acepta sample_weight directamente; duplicar filas es equivalente.
+        X_tab_train, y_tab_train = _oversample_by_year(X_tab_train, y_tab_train, years_tab_train)
         tab_model.fit(
             X_train=X_tab_train,
             y_train=y_tab_train,
@@ -260,7 +290,7 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
             batch_size=tab_batch,
             virtual_batch_size=min(tab_batch // 4, 128),
             num_workers=0,
-            drop_last=False,
+            drop_last=True,
         )
         # Temperature Scaling: aprende T en el conjunto de calibración
         tab_temperature = _fit_temperature(tab_model, X_tab_cal, y_tab_cal)
@@ -268,9 +298,8 @@ def train(upload_s3: bool = False, model: str = "all", optimize: bool = False, n
 
     # 4. Métricas de importancia → Looker Studio
     # Importancias XGBoost: promedio de los 5 modelos del cv (cada uno es un fold)
-    def _xgb_importances(calibrated_model):
-        imps = [cc.estimator.feature_importances_ for cc in calibrated_model.calibrated_classifiers_]
-        return np.mean(imps, axis=0)
+    def _xgb_importances(xgb_m):
+        return xgb_m.feature_importances_
 
     if xgb_model is not None and tab_model is not None:
         logger.info("Calculando importancia de variables (ambos modelos)...")

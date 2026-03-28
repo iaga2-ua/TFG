@@ -29,6 +29,7 @@ Uso:
 
 import argparse
 import logging
+import os
 import pickle
 import sys
 from datetime import datetime, timezone
@@ -42,7 +43,7 @@ sys.path.insert(0, str(ROOT))
 
 from config import (
     CURRENT_SEASON, ENCODER_FILE, FASTF1_CACHE, MODEL_FILE, PROCESSED_DIR, RAW_DIR,
-    TABNET_MODEL_PATH, SCALER_FILE, TABNET_TEMPERATURE_FILE,
+    TABNET_MODEL_PATH, SCALER_FILE, TABNET_TEMPERATURE_FILE, XGB_TEMPERATURE_FILE,
 )
 from src.data_collection import fetch_qualifying_snapshot
 
@@ -202,27 +203,51 @@ def _save_proba_snapshot(
 
     drivers = df_live["driver_abbr"].tolist()
 
-    # XGBoost (modelo local)
+    # XGBoost: intentar obtener probabilidades invocando Lambda (modelo en S3)
     xgb_probs_dict: dict[str, float] = {}
-    if MODEL_FILE.exists():
-        try:
-            with open(MODEL_FILE, "rb") as f:
-                xgb_model = pickle.load(f)
-            X = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
-            boosters = [cc.estimator.get_booster() for cc in xgb_model.calibrated_classifiers_]
-            saved_names = [b.feature_names for b in boosters]
-            for b in boosters:
-                b.feature_names = None
+    try:
+        import boto3
+        from config import LAMBDA_FUNCTION_NAME, AWS_REGION, AWS_PROFILE
+        # profile_name sólo se usa fuera de Docker (en Docker las credenciales
+        # vienen de variables de entorno, no de ~/.aws/credentials).
+        _profile = AWS_PROFILE if not os.environ.get("AWS_ACCESS_KEY_ID") else None
+        session = boto3.Session(region_name=AWS_REGION, profile_name=_profile)
+        lam = session.client("lambda")
+        payload = json.dumps({"year": year, "round": round_num, "upload": False})
+        resp = lam.invoke(
+            FunctionName=LAMBDA_FUNCTION_NAME,
+            InvocationType="RequestResponse",
+            Payload=payload,
+        )
+        raw_payload = json.loads(resp["Payload"].read())
+        body = raw_payload.get("body", raw_payload)
+        if isinstance(body, str):
+            body = json.loads(body)
+        xgb_probs_dict = body.get("xgb_probs_all", {})
+        logger.info("XGBoost probs obtenidas desde Lambda (%d pilotos).", len(xgb_probs_dict))
+    except Exception as exc:
+        logger.warning("No se pudo invocar Lambda para XGBoost probs: %s — usando modelo local.", exc)
+        # Fallback: modelo local
+        if MODEL_FILE.exists():
             try:
+                with open(MODEL_FILE, "rb") as f:
+                    xgb_model = pickle.load(f)
+                X = apply_features(df_live, encoders, history_df=history_df, year=year, round_num=round_num)
                 raw = xgb_model.predict_proba(X.values)[:, 1]
-            finally:
-                for b, fn in zip(boosters, saved_names):
-                    b.feature_names = fn
-            s = raw.sum()
-            normed = (raw / s if s > 0 else raw).tolist()
-            xgb_probs_dict = dict(zip(drivers, normed))
-        except Exception as exc:
-            logger.warning("No se pudo calcular XGBoost para el snapshot: %s", exc)
+                # Temperature scaling (same as Lambda)
+                xgb_T = 1.0
+                if XGB_TEMPERATURE_FILE.exists():
+                    with open(XGB_TEMPERATURE_FILE, "rb") as ft:
+                        xgb_T = pickle.load(ft)
+                eps = 1e-7
+                raw = np.clip(raw, eps, 1 - eps)
+                logits = np.log(raw / (1 - raw))
+                raw = 1.0 / (1.0 + np.exp(-logits / xgb_T))
+                s = raw.sum()
+                normed = (raw / s if s > 0 else raw).tolist()
+                xgb_probs_dict = dict(zip(drivers, normed))
+            except Exception as exc2:
+                logger.warning("Tampoco se pudo calcular XGBoost local para el snapshot: %s", exc2)
 
     snapshot = {
         "year": year,

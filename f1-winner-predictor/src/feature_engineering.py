@@ -38,6 +38,49 @@ def _driver_wet_win_rate(df: pd.DataFrame, window: int = 10) -> pd.Series:
 
     return df.groupby("driver_abbr").apply(calc_wet_rate).reset_index(level=0, drop=True)
 
+def _driver_current_season_win_rate(df: pd.DataFrame) -> pd.Series:
+    """Tasa de victorias del piloto en la temporada actual, usando solo carreras anteriores."""
+    df = df.sort_values(["driver_abbr", "year", "round"])
+
+    def calc(g):
+        result = pd.Series(0.0, index=g.index)
+        for i, (idx, row) in enumerate(g.iterrows()):
+            season_past = g[(g["year"] == row["year"]) & (g["round"] < row["round"])]
+            if season_past.empty:
+                result.at[idx] = 0.0
+            else:
+                result.at[idx] = season_past["is_winner"].mean()
+        return result
+
+    return df.groupby("driver_abbr").apply(calc).reset_index(level=0, drop=True)
+
+def _driver_races_since_last_win(df: pd.DataFrame) -> pd.Series:
+    """Número de carreras desde la última victoria (50 si nunca ha ganado o lleva mucho)."""
+    df = df.sort_values(["driver_abbr", "year", "round"])
+
+    def calc(g):
+        result = pd.Series(50, index=g.index, dtype=float)
+        for i, (idx, row) in enumerate(g.iterrows()):
+            past_wins = g[(g["year"] < row["year"]) |
+                          ((g["year"] == row["year"]) & (g["round"] < row["round"]))]
+            past_wins = past_wins[past_wins["is_winner"] == 1]
+            if past_wins.empty:
+                result.at[idx] = 50.0
+            else:
+                # Número de carreras disputadas desde la última victoria
+                last_win_idx = past_wins.index[-1]
+                races_after = g[(g["year"] > g.at[last_win_idx, "year"]) |
+                                 ((g["year"] == g.at[last_win_idx, "year"]) &
+                                  (g["round"] > g.at[last_win_idx, "round"]))]
+                races_before_now = races_after[
+                    (races_after["year"] < row["year"]) |
+                    ((races_after["year"] == row["year"]) & (races_after["round"] < row["round"]))
+                ]
+                result.at[idx] = float(len(races_before_now))
+        return result
+
+    return df.groupby("driver_abbr").apply(calc).reset_index(level=0, drop=True)
+
 # ─── METADATA Y STANDINGS ──────────────────────────────────────────────────────
 
 def _attach_circuit_metadata(df: pd.DataFrame) -> pd.DataFrame:
@@ -90,7 +133,8 @@ def _circuit_driver_history(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         circuit_val = grp["circuit"].iloc[0]
-        circ_hist = hist[hist["circuit"] == circuit_val]
+        # Limitar a los últimos 3 años: contexto reciente más relevante que dominancia histórica
+        circ_hist = hist[(hist["circuit"] == circuit_val) & (hist["year"] >= year - 3)]
         stats = circ_hist.groupby("driver_abbr")["race_position"].agg(
             driver_best_finish_circuit="min", driver_avg_finish_circuit="mean"
         ).reset_index()
@@ -166,6 +210,8 @@ def build_features(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, dict]
     df["driver_avg_finish_l3"] = _driver_rolling_avg_finish(df)
     df["driver_win_rate_l5"] = _driver_rolling_win_rate(df)
     df["driver_wet_win_rate"] = _driver_wet_win_rate(df)
+    df["driver_current_season_win_rate"] = _driver_current_season_win_rate(df)
+    df["driver_races_since_last_win"] = _driver_races_since_last_win(df)
     
     # Añadir circuitos y standings
     circ_hist = _circuit_driver_history(df)
@@ -268,15 +314,37 @@ def _enrich_live_from_history(
             wet_drv["is_winner"].tail(10).mean() if not wet_drv.empty else 0.0
         )
 
-        # Circuit-specific history
+        # Circuit-specific history (últimos 3 años: excluye dominancia obsoleta)
         if circuit_val is not None:
-            circ_drv = drv[drv["circuit"] == circuit_val]
+            year_cutoff = (year if year is not None else int(past["year"].max())) - 3
+            circ_drv = drv[(drv["circuit"] == circuit_val) & (drv["year"] >= year_cutoff)]
             df.loc[df["driver_abbr"] == abbr, "driver_best_finish_circuit"] = (
                 circ_drv["race_position"].min() if not circ_drv.empty else np.nan
             )
             df.loc[df["driver_abbr"] == abbr, "driver_avg_finish_circuit"] = (
                 circ_drv["race_position"].mean() if not circ_drv.empty else np.nan
             )
+
+        # Current-season form (solo carreras de la temporada que se predice)
+        if year is not None:
+            season_drv = drv[drv["year"] == year]
+        else:
+            season_drv = drv
+        df.loc[df["driver_abbr"] == abbr, "driver_current_season_win_rate"] = (
+            season_drv["is_winner"].mean() if not season_drv.empty else 0.0
+        )
+        # Races since last win (overall, not just this season)
+        wins = drv[drv["is_winner"] == 1]
+        if wins.empty:
+            df.loc[df["driver_abbr"] == abbr, "driver_races_since_last_win"] = 50.0
+        else:
+            last_win_year  = wins.iloc[-1]["year"]
+            last_win_round = wins.iloc[-1]["round"]
+            races_after = len(drv[
+                (drv["year"] > last_win_year) |
+                ((drv["year"] == last_win_year) & (drv["round"] > last_win_round))
+            ])
+            df.loc[df["driver_abbr"] == abbr, "driver_races_since_last_win"] = float(races_after)
 
     # Championship standings (sólo carreras del año actual hasta la ronda anterior)
     if year is not None and round_num is not None:

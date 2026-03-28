@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     AWS_REGION, AWS_PROFILE,
     S3_BUCKET, S3_HISTORY_KEY, S3_MODEL_KEY, S3_ENCODER_KEY,
-    S3_RACE_RESULTS_KEY, S3_MODEL_ACCURACY_KEY,
-    MODEL_FILE, ENCODER_FILE, RAW_DIR,
+    S3_RACE_RESULTS_KEY, S3_MODEL_ACCURACY_KEY, S3_XGB_TEMPERATURE_KEY,
+    MODEL_FILE, ENCODER_FILE, XGB_TEMPERATURE_FILE, RAW_DIR,
     ATHENA_DATABASE, ATHENA_TABLE, ATHENA_TABLE_IMPORTANCE, ATHENA_TABLE_ACCURACY,
     ATHENA_OUTPUT_LOC,
 )
@@ -138,11 +138,12 @@ def upload_to_s3(local_path: Path, s3_key: str) -> None:
 # ─── MODELOS Y ARTEFACTOS ────────────────────────────────────────────────────
 
 def upload_model_artefacts() -> None:
-    """Sube XGBoost, Encoders y el CSV de resultados históricos de carrera."""
+    """Sube XGBoost, Encoders, temperatura XGB y el CSV de resultados históricos de carrera."""
     artefacts = [
         (MODEL_FILE, S3_MODEL_KEY),
         (ENCODER_FILE, S3_ENCODER_KEY),
         (RAW_DIR / "race_results_raw.csv", S3_RACE_RESULTS_KEY),
+        (XGB_TEMPERATURE_FILE, S3_XGB_TEMPERATURE_KEY),
     ]
     for local, key in artefacts:
         if local.exists():
@@ -151,9 +152,16 @@ def upload_model_artefacts() -> None:
 def download_model_artefacts() -> None:
     """Descarga artefactos (usado por Lambda)."""
     s3 = _s3_client()
-    for local, key in [(MODEL_FILE, S3_MODEL_KEY), (ENCODER_FILE, S3_ENCODER_KEY)]:
+    for local, key in [
+        (MODEL_FILE, S3_MODEL_KEY),
+        (ENCODER_FILE, S3_ENCODER_KEY),
+        (XGB_TEMPERATURE_FILE, S3_XGB_TEMPERATURE_KEY),
+    ]:
         local.parent.mkdir(parents=True, exist_ok=True)
-        s3.download_file(S3_BUCKET, key, str(local))
+        try:
+            s3.download_file(S3_BUCKET, key, str(local))
+        except Exception:
+            pass  # xgb_temperature puede no existir en S3 aún
 
 def download_race_results() -> pd.DataFrame:
     """Descarga race_results_raw.csv de S3 (usado por Lambda para features históricas)."""

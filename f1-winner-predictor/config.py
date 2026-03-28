@@ -44,6 +44,8 @@ FEATURE_COLS = [
     "constructor_champ_pos", "constructor_champ_points",
     "driver_avg_finish_l3", "driver_win_rate_l5", "driver_wet_win_rate",
     "driver_best_finish_circuit", "driver_avg_finish_circuit",
+    # Forma en la temporada actual (evita sesgo por dominancia histórica de un piloto)
+    "driver_current_season_win_rate", "driver_races_since_last_win",
     # Circuit metadata (FastF1 dinámico)
     "track_length_km", "corner_count",
     # Circuit metadata (tabla estática)
@@ -65,6 +67,7 @@ ENCODER_FILE   = MODELS_DIR / "label_encoders.pkl"
 TABNET_MODEL_PATH        = MODELS_DIR / "tabnet_model"
 SCALER_FILE              = MODELS_DIR / "scaler.pkl"
 TABNET_TEMPERATURE_FILE  = MODELS_DIR / "tabnet_temperature.pkl"  # Temperature Scaling (T >= 1)
+XGB_TEMPERATURE_FILE     = MODELS_DIR / "xgb_temperature.pkl"     # Temperature Scaling XGBoost
 
 XGBOOST_PARAMS = {
     "n_estimators": 500,
@@ -74,8 +77,15 @@ XGBOOST_PARAMS = {
     "colsample_bytree": 0.8,
     "min_child_weight": 3,
     "gamma": 0.1,
-    # Ajuste para 22 pilotos: 1 ganador vs 21 perdedores
-    "scale_pos_weight": 21, 
+    # scale_pos_weight=5: corrección parcial del desbalance 1:21.
+    # El valor completo (21) sobreconcentra las probabilidades en el piloto
+    # más dominante (e.g. ANT con 100% win-rate en 2026). Con 5 el modelo
+    # sigue favoreciendo al ganador esperado pero deja spread real en P2-P5.
+    "scale_pos_weight": 5,
+    # base_score=1/22: prior natural (1 ganador entre 22 pilotos).
+    # El default (0.5) es un prior absurdamente alto que infla las predicciones
+    # de pilotos con pocos datos (pilotos nuevos como ANT con solo 2 carreras).
+    "base_score": 0.045,
     "eval_metric": "logloss",
     "use_label_encoder": False,
     "random_state": 42,
@@ -94,6 +104,7 @@ LAMBDA_FUNCTION_NAME = os.environ.get("LAMBDA_FUNCTION_NAME", "f1-winner-predict
 S3_HISTORY_KEY     = "predictions/history.csv"       # historial unificado (input de Athena)
 S3_MODEL_KEY       = "models/xgboost_f1_winner.pkl"  # artefacto XGBoost para Lambda
 S3_ENCODER_KEY     = "models/label_encoders.pkl"     # encoders compartidos con Lambda
+S3_XGB_TEMPERATURE_KEY = "models/xgb_temperature.pkl"  # Temperature Scaling XGBoost
 S3_IMPORTANCE_KEY    = "metrics/feature_importance.csv"
 S3_PERFORMANCE_KEY   = "metrics/historical_performance.csv"
 S3_MODEL_ACCURACY_KEY = "metrics/model_accuracy/model_accuracy.csv"  # métricas Brier+MAE → Athena

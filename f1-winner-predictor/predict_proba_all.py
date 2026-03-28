@@ -31,6 +31,7 @@ from config import (
     SCALER_FILE,
     TABNET_MODEL_PATH,
     TABNET_TEMPERATURE_FILE,
+    XGB_TEMPERATURE_FILE,
 )
 from src.data_collection import fetch_qualifying_snapshot
 from src.feature_engineering import apply_features
@@ -89,21 +90,19 @@ def _load_history() -> pd.DataFrame:
 # ─── Inferencia ──────────────────────────────────────────────────────────────
 
 def _xgboost_probs(xgb_model, X) -> np.ndarray:
-    # CalibratedClassifierCV convierte el DataFrame a numpy internamente, pero
-    # el modelo XGBoost tiene feature_names guardados → falla la validación.
-    # Solución: borrar temporalmente los nombres antes de predecir y restaurarlos.
-    boosters = [cc.estimator.get_booster() for cc in xgb_model.calibrated_classifiers_]
-    saved_names = [b.feature_names for b in boosters]
-    for b in boosters:
-        b.feature_names = None
-    try:
-        data = X.values if hasattr(X, "values") else X
-        probs = xgb_model.predict_proba(data)[:, 1]
-    finally:
-        for b, fn in zip(boosters, saved_names):
-            b.feature_names = fn
-    s = probs.sum()
-    return probs / s if s > 0 else probs
+    data = X.values if hasattr(X, "values") else X
+    raw = xgb_model.predict_proba(data)[:, 1]
+    # Temperature scaling
+    xgb_T = 1.0
+    if XGB_TEMPERATURE_FILE.exists():
+        with open(XGB_TEMPERATURE_FILE, "rb") as f:
+            xgb_T = pickle.load(f)
+    eps = 1e-7
+    raw = np.clip(raw, eps, 1 - eps)
+    logits = np.log(raw / (1 - raw))
+    cal = 1.0 / (1.0 + np.exp(-logits / xgb_T))
+    s = cal.sum()
+    return cal / s if s > 0 else cal
 
 
 def _tabnet_probs(tab_model, scaler, temperature: float, X: np.ndarray) -> np.ndarray:
@@ -194,6 +193,21 @@ def run(year: int, round_num: int) -> None:
     }).assign(sort_key=sort_key).sort_values("sort_key", ascending=False).drop(columns="sort_key")
 
     _print_table(event_name, round_num, year, result_df)
+    _save_table(event_name, round_num, year, result_df)
+
+
+def _save_table(event_name: str, round_num: int, year: int, df: pd.DataFrame) -> None:
+    """Guarda la tabla de probabilidades en data/processed/ como CSV."""
+    from datetime import datetime, timezone
+    out_df = df.copy().reset_index(drop=True)
+    out_df.insert(0, "rank", range(1, len(out_df) + 1))
+    out_df.insert(1, "year", year)
+    out_df.insert(2, "round", round_num)
+    out_df.insert(3, "event_name", event_name)
+    out_df["saved_at"] = datetime.now(timezone.utc).isoformat()
+    out_path = PROCESSED_DIR / f"proba_table_{year}_R{round_num:02d}.csv"
+    out_df.to_csv(out_path, index=False)
+    print(f"[INFO] Tabla guardada en: {out_path}")
 
 
 if __name__ == "__main__":

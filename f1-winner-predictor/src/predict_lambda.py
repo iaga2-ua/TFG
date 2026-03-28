@@ -24,7 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import CURRENT_SEASON, MODEL_FILE, ENCODER_FILE
+from config import CURRENT_SEASON, MODEL_FILE, ENCODER_FILE, XGB_TEMPERATURE_FILE
 from src.data_collection import fetch_qualifying_snapshot
 from src.feature_engineering import apply_features
 from src.aws_utils import (
@@ -39,24 +39,34 @@ logger.setLevel(logging.INFO)
 # Cache warm-start
 _XGB_MODEL    = None
 _ENCODERS     = None
+_XGB_TEMPERATURE = 1.0
 _RACE_RESULTS = None  # race_results_raw.csv descargado de S3
 
 def _load_models():
     """Descarga modelos desde S3 a /tmp y los carga."""
-    global _XGB_MODEL, _ENCODERS
+    global _XGB_MODEL, _ENCODERS, _XGB_TEMPERATURE
     if _XGB_MODEL is not None:
         return _XGB_MODEL, _ENCODERS
 
     import boto3
-    from config import S3_BUCKET, S3_MODEL_KEY, S3_ENCODER_KEY, AWS_REGION
+    from config import S3_BUCKET, S3_MODEL_KEY, S3_ENCODER_KEY, S3_XGB_TEMPERATURE_KEY, AWS_REGION
 
     s3 = boto3.client("s3", region_name=AWS_REGION)
     model_tmp   = Path("/tmp/xgboost_f1_winner.pkl")
     encoder_tmp = Path("/tmp/label_encoders.pkl")
+    temp_tmp    = Path("/tmp/xgb_temperature.pkl")
 
     logger.info("Descargando modelos desde s3://%s ...", S3_BUCKET)
     s3.download_file(S3_BUCKET, S3_MODEL_KEY,   str(model_tmp))
     s3.download_file(S3_BUCKET, S3_ENCODER_KEY, str(encoder_tmp))
+    try:
+        s3.download_file(S3_BUCKET, S3_XGB_TEMPERATURE_KEY, str(temp_tmp))
+        with open(temp_tmp, "rb") as f:
+            _XGB_TEMPERATURE = pickle.load(f)
+        logger.info("XGB Temperature Scaling cargado: T=%.4f", _XGB_TEMPERATURE)
+    except Exception:
+        _XGB_TEMPERATURE = 1.0
+        logger.warning("xgb_temperature.pkl no encontrado en S3 — usando T=1.0")
 
     with open(model_tmp,   "rb") as f: _XGB_MODEL = pickle.load(f)
     with open(encoder_tmp, "rb") as f: _ENCODERS  = pickle.load(f)
@@ -86,15 +96,17 @@ def predict(year: int, round_num: int, upload: bool = True) -> dict:
     race_results_df = _load_race_results()
 
     X     = apply_features(df_live, encoders, history_df=race_results_df, year=year, round_num=round_num)
-    probs = xgb_model.predict_proba(X)[:, 1]
+    raw_probs = xgb_model.predict_proba(X)[:, 1]
+
+    # Temperature Scaling: suaviza la distribución extrema de XGBoost (scale_pos_weight=5)
+    eps = 1e-7
+    raw_probs = np.clip(raw_probs, eps, 1 - eps)
+    logits    = np.log(raw_probs / (1 - raw_probs))
+    cal_probs = 1.0 / (1.0 + np.exp(-logits / _XGB_TEMPERATURE))
 
     # Normalizar entre los N pilotos para que las probabilidades sumen 1
-    # y sean interpretables como cuota relativa de victoria.
-    # XGBoost predice cada piloto de forma independiente (clasificacion binaria),
-    # por lo que los valores brutos no suman 1 y pueden ser engañosamente altos.
-    probs_sum = probs.sum()
-    if probs_sum > 0:
-        probs = probs / probs_sum
+    probs_sum = cal_probs.sum()
+    probs = cal_probs / probs_sum if probs_sum > 0 else cal_probs
 
     best_idx    = int(np.argmax(probs))
     winner_abbr = df_live.iloc[best_idx]["driver_abbr"]
@@ -126,6 +138,7 @@ def predict(year: int, round_num: int, upload: bool = True) -> dict:
             "event":            event_name,
             "predicted_winner": winner_abbr,
             "win_probability":  f"{winner_prob:.1%}",
+            "xgb_probs_all":    dict(zip(df_live["driver_abbr"].tolist(), probs.tolist())),
         },
     }
 

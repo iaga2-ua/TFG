@@ -1,12 +1,12 @@
 # F1 Winner Predictor 2026
 
-Predictor del ganador de cada Gran Premio de Fórmula 1 basado en datos de clasificación (sábado). Combina dos modelos de machine learning — **XGBoost** (desplegado en AWS Lambda) y **TabNet** (inferencia local) — y sincroniza predicciones y métricas con Google Sheets para visualización en Looker Studio.
+Predicts the winner of each Formula 1 Grand Prix based on Saturday qualifying data. Combines two machine learning models — **XGBoost** (deployed on AWS Lambda) and **TabNet** (local inference) — and synchronises predictions and metrics with Google Sheets for visualisation in Looker Studio.
 
 ---
 
-## Arquitectura general
+## General architecture
 
-```
+```text
 FastF1 API
     │
     ▼
@@ -30,33 +30,33 @@ data_collection.py  ──►  feature_engineering.py
           ┌──────────┴──────────┐
           ▼                     ▼
     Google Sheets           Athena
-    (Looker Studio       (disponible para
-     — fuente activa)    consultas SQL ad-hoc)
+    (Looker Studio       (available for
+     — active source)    ad-hoc SQL queries)
 ```
 
 ---
 
-## Estructura del proyecto
+## Project structure
 
-```
+```text
 f1-winner-predictor/
-├── config.py                  # Configuración central (paths, features, parámetros)
-├── train.py                   # Entrenamiento XGBoost + TabNet con Optuna
-├── predict.py                 # Inferencia TabNet local + registro de resultados
-├── predict_proba_all.py       # Probabilidades de todos los pilotos (XGBoost + TabNet, sin S3)
-├── requirements.txt           # Dependencias del entorno local/Docker
-├── requirements-lambda.txt    # Dependencias del contenedor Lambda
-├── Dockerfile                 # Imagen para entrenamiento y predicción local
-├── Dockerfile.lambda          # Imagen para AWS Lambda (ECR)
-├── Dockerfile.layer           # Layer de dependencias Lambda
+├── config.py                  # Central configuration (paths, features, parameters)
+├── train.py                   # XGBoost + TabNet training with Optuna
+├── predict.py                 # Local TabNet inference + result logging
+├── predict_proba_all.py       # Full win-probability table (XGBoost + TabNet, no S3 writes)
+├── requirements.txt           # Local/Docker environment dependencies
+├── requirements-lambda.txt    # Lambda container dependencies
+├── Dockerfile                 # Image for local training and prediction
+├── Dockerfile.lambda          # Image for AWS Lambda (ECR)
+├── Dockerfile.layer           # Lambda dependency layer
 ├── src/
 │   ├── __init__.py
-│   ├── data_collection.py     # Descarga datos de FastF1 (quali, carrera, meteorología)
-│   ├── feature_engineering.py # Construcción de features para XGBoost y TabNet
-│   ├── aws_utils.py           # S3, Google Sheets sync (Athena configurado para SQL ad-hoc)
-│   ├── predict_lambda.py      # Handler de AWS Lambda (inferencia XGBoost)
-│   └── circuit_metadata.py    # Tabla estática de metadatos de circuitos
-└── models/                    # Artefactos locales (gitignored, gestionados vía S3)
+│   ├── data_collection.py     # Downloads FastF1 data (quali, race, weather)
+│   ├── feature_engineering.py # Builds features for XGBoost and TabNet
+│   ├── aws_utils.py           # S3, Google Sheets sync (Athena configured for ad-hoc SQL)
+│   ├── predict_lambda.py      # AWS Lambda handler (XGBoost inference)
+│   └── circuit_metadata.py    # Static circuit metadata table
+└── models/                    # Local artefacts (gitignored, managed via S3)
     ├── xgboost_f1_winner.pkl
     ├── label_encoders.pkl
     ├── tabnet_model.zip
@@ -65,196 +65,199 @@ f1-winner-predictor/
 
 ---
 
-## Features utilizadas (28 variables)
+## Features used (28 variables)
 
-| Categoría | Feature | Descripción |
-|---|---|---|
-| **Clasificación** | `grid_position` | Posición en parrilla (sábado, no penalizaciones) |
-| **Clasificación** | `quali_gap_to_pole_s` | Gap al pole en segundos. Se calcula como `min(Q1, Q2, Q3)` para capturar la mejor vuelta real de cada piloto independientemente de la sesión en que fue eliminado |
-| **Práctica libre** | `fp2_long_run_pace_gap_s` | Gap al mejor ritmo de carrera en FP2 |
-| **Práctica libre** | `fp3_gap_to_best_s` | Gap al mejor tiempo en FP3 |
-| **Sprint Race** | `sprint_race_position` | Posición en el Sprint Race (0 = GP sin sprint). Proxy de ritmo real en carrera, disponible antes de la clasificación del sábado |
-| **Meteorología** | `rain_probability` | Fracción de la sesión con lluvia (0–1) |
-| **Meteorología** | `is_wet_qualifying` | Binario: clasificación en mojado |
-| **Meteorología** | `track_temp_c`, `humidity_pct`, `wind_speed_ms` | Condiciones durante la clasificación |
-| **Campeonato** | `driver_champ_pos`, `driver_champ_points` | Posición y puntos del piloto antes de la carrera |
-| **Campeonato** | `constructor_champ_pos`, `constructor_champ_points` | Posición y puntos del constructor |
-| **Historial piloto** | `driver_avg_finish_l3` | Media de posición final en las últimas 3 carreras |
-| **Historial piloto** | `driver_win_rate_l5` | Tasa de victorias en las últimas 5 carreras |
-| **Historial piloto** | `driver_wet_win_rate` | Tasa de victorias en carreras mojadas (últimas 10) |
-| **Historial piloto** | `driver_current_season_win_rate` | Tasa de victorias en la temporada actual. Evita sesgo por dominancia histórica de un piloto en temporadas anteriores |
-| **Historial piloto** | `driver_races_since_last_win` | Carreras desde la última victoria (máximo 50). Penaliza a pilotos que no ganan hace tiempo |
-| **Historial circuito** | `driver_best_finish_circuit`, `driver_avg_finish_circuit` | Mejor y media de resultado en este circuito en los **últimos 3 años** (se excluye el histórico más antiguo para evitar que victorias obsoletas distorsionen la predicción) |
-| **Circuito (FastF1)** | `track_length_km`, `corner_count` | Longitud y número de curvas (dinámico) |
-| **Circuito (estático)** | `overtake_difficulty`, `drs_zones`, `avg_safety_car_prob` | Dificultad de adelantamiento, zonas DRS, probabilidad histórica de SC |
-| **Contexto** | `race_number` | Número de ronda en la temporada |
-| **Codificados** | `circuit_encoded`, `constructor_encoded` | Label encoding de circuito y constructor |
+| Category | Feature | Description |
+| --- | --- | --- |
+| **Qualifying** | `grid_position` | Grid position (Saturday, penalties not applied) |
+| **Qualifying** | `quali_gap_to_pole_s` | Gap to pole in seconds. Computed as `min(Q1, Q2, Q3)` to capture each driver's actual fastest lap regardless of which session they were eliminated in |
+| **Practice** | `fp2_long_run_pace_gap_s` | Gap to the best long-run pace in FP2 |
+| **Practice** | `fp3_gap_to_best_s` | Gap to the fastest time in FP3 |
+| **Sprint Race** | `sprint_race_position` | Sprint Race position (0 = non-sprint weekend). Proxy for real race pace, available before Saturday qualifying |
+| **Weather** | `rain_probability` | Fraction of the session with rain (0–1) |
+| **Weather** | `is_wet_qualifying` | Binary: wet qualifying session |
+| **Weather** | `track_temp_c`, `humidity_pct`, `wind_speed_ms` | Conditions during qualifying |
+| **Championship** | `driver_champ_pos`, `driver_champ_points` | Driver standings position and points before the race |
+| **Championship** | `constructor_champ_pos`, `constructor_champ_points` | Constructor standings position and points |
+| **Driver history** | `driver_avg_finish_l3` | Average finishing position over the last 3 races |
+| **Driver history** | `driver_win_rate_l5` | Win rate over the last 5 races |
+| **Driver history** | `driver_wet_win_rate` | Win rate in wet races (last 10) |
+| **Driver history** | `driver_current_season_win_rate` | Win rate in the current season. Avoids bias from a driver's historical dominance in previous seasons |
+| **Driver history** | `driver_races_since_last_win` | Races since last win (capped at 50). Penalises drivers who haven't won recently |
+| **Circuit history** | `driver_best_finish_circuit`, `driver_avg_finish_circuit` | Best and average result at this circuit over the **last 3 years** (older history excluded to avoid obsolete wins distorting predictions) |
+| **Circuit (FastF1)** | `track_length_km`, `corner_count` | Track length and corner count (dynamic) |
+| **Circuit (static)** | `overtake_difficulty`, `drs_zones`, `avg_safety_car_prob` | Overtaking difficulty, DRS zones, historical safety car probability |
+| **Context** | `race_number` | Round number within the season |
+| **Encoded** | `circuit_encoded`, `constructor_encoded` | Label encoding of circuit and constructor |
 
 ---
 
-## Modelos
+## Models
 
-### XGBoost (nube — AWS Lambda)
-- Clasificador binario (`is_winner = 1` para el ganador de cada carrera)
-- `scale_pos_weight = 5`: corrección parcial del desbalance. El valor completo (21) sobreconcentra las probabilidades en el favorito; con 5 el modelo mantiene spread real entre los pilotos de cabeza.
-- `base_score = 0.045` (= 1/22): prior natural de victoria. El default de XGBoost (0.5) inflaba artificialmente las estimaciones de pilotos con pocos datos.
-- Hiperparámetros optimizados con **Optuna** (ROC-AUC, 5-fold CV estratificado)
-- Entrenado con datos 2023–2026 con **pesos de recencia** `{2023:1, 2024:1, 2025:2, 2026:2}` mediante `sample_weight`
-- Artefactos en S3: `models/xgboost_f1_winner.pkl` + `models/label_encoders.pkl` + `models/xgb_temperature.pkl`
+### XGBoost (cloud — AWS Lambda)
 
-#### Calibración de probabilidades (Temperature Scaling)
+- Binary classifier (`is_winner = 1` for the race winner)
+- `scale_pos_weight = 5`: partial class-imbalance correction. The full value (21) over-concentrates probabilities on the favourite; 5 maintains a realistic spread across the top drivers.
+- `base_score = 0.045` (= 1/22): natural win prior. XGBoost's default (0.5) artificially inflated estimates for drivers with sparse data.
+- Hyperparameters optimised with **Optuna** (ROC-AUC, 5-fold stratified CV)
+- Trained on 2023–2026 data with **recency weights** `{2023:1, 2024:1, 2025:2, 2026:2}` via `sample_weight`
+- Artefacts in S3: `models/xgboost_f1_winner.pkl` + `models/label_encoders.pkl` + `models/xgb_temperature.pkl`
 
-XGBoost predice cada piloto como un clasificador binario independiente. Esto genera dos problemas:
+#### Probability calibration (Temperature Scaling)
 
-1. **Confianza extrema**: sin calibración, el poleman puede recibir ~90–99%, muy por encima de la frecuencia real de victorias desde pole (~40–45%).
-2. **No suman 1**: las probabilidades de los 22 clasificadores no tienen por qué sumar 100%.
+XGBoost predicts each driver as an independent binary classifier. This causes two problems:
 
-**Temperature Scaling** (`train.py → _fit_temperature`): XGBoost se entrena con el **80%** de los datos. Con el **20% restante** se minimiza la NLL para encontrar el $T$ óptimo, que se guarda en `models/xgb_temperature.pkl`.
+1. **Extreme confidence**: without calibration, the pole-sitter can receive ~90–99%, well above the true win rate from pole (~40–45%).
+2. **Probabilities do not sum to 1**: the 22 independent classifiers' outputs need not sum to 100%.
 
-Al predecir (`predict_lambda.py`, `predict.py`, `predict_proba_all.py`), se extraen los logits ($z = \log\frac{p}{1-p}$), se dividen entre $T$, se pasa por sigmoid y finalmente se normaliza entre los $N$ pilotos:
+**Temperature Scaling** (`train.py → _fit_temperature`): XGBoost is trained on **80%** of the data. The remaining **20%** is used to minimise NLL and find the optimal $T$, saved to `models/xgb_temperature.pkl`.
+
+At inference time (`predict_lambda.py`, `predict.py`, `predict_proba_all.py`), logits are extracted ($z = \log\frac{p}{1-p}$), divided by $T$, passed through sigmoid, and finally normalised across the $N$ drivers:
 
 $$p_{\text{cal}} = \frac{1}{1 + e^{-z/T}}, \quad p_{\text{norm}} = \frac{p_{\text{cal}}}{\sum_i p_{\text{cal},i}}$$
 
 ### TabNet (local)
-- Red neuronal tabular con mecanismo de atención (pytorch-tabnet)
-- Mismos datos y features que XGBoost
-- Estandarización previa con `StandardScaler`
-- Hiperparámetros optimizados con **Optuna** (ROC-AUC, validación 20%)
-- Entrenado con **oversampling por recencia** `{2023:1, 2024:1, 2025:2, 2026:2}`: las filas de temporadas recientes se duplican en el conjunto de entrenamiento. TabNet no acepta `sample_weight` directamente; duplicar filas es equivalente.
-- Artefactos en local: `models/tabnet_model.zip` + `models/scaler.pkl` + `models/tabnet_temperature.pkl`
 
-#### Calibración de probabilidades (Temperature Scaling)
+- Tabular neural network with sequential attention mechanism (pytorch-tabnet)
+- Same data and features as XGBoost
+- Pre-standardised with `StandardScaler`
+- Hyperparameters optimised with **Optuna** (ROC-AUC, 20% validation)
+- Trained with **recency oversampling** `{2023:1, 2024:1, 2025:2, 2026:2}`: rows from recent seasons are duplicated in the training set. TabNet does not natively support `sample_weight`; row duplication is equivalent.
+- Artefacts locally: `models/tabnet_model.zip` + `models/scaler.pkl` + `models/tabnet_temperature.pkl`
 
-Las redes neuronales tienden a ser **sobreconfiadas**: la función softmax final produce probabilidades muy cercanas a 1 aunque la predicción sea incierta. Esto se corrige con **Temperature Scaling**, la técnica de calibración más habitual en producción para redes neuronales ([Guo et al., 2017](https://arxiv.org/abs/1706.04599)).
+#### Probability calibration — TabNet
 
-La idea es dividir los logits $z$ (pre-sigmoid) por una temperatura $T \geq 1$ antes de calcular la probabilidad final:
+Neural networks tend to be **overconfident**: the final softmax produces probabilities close to 1 even under uncertainty. This is corrected with **Temperature Scaling**, the standard post-hoc calibration technique for neural networks ([Guo et al., 2017](https://arxiv.org/abs/1706.04599)).
+
+The idea is to divide the logits $z$ (pre-sigmoid) by a temperature $T \geq 1$ before computing the final probability:
 
 $$p_{\text{cal}} = \sigma\!\left(\frac{z}{T}\right) = \frac{1}{1 + e^{-z/T}}$$
 
-- $T = 1$: sin cambio (modelo original)
-- $T > 1$: aplana las probabilidades, reduce la sobreconfianza
-- $T < 1$: concentra las probabilidades, aumenta la confianza (raro en redes neuronales)
+- $T = 1$: no change (original model)
+- $T > 1$: flattens probabilities, reduces overconfidence
+- $T < 1$: sharpens probabilities, increases confidence (uncommon in neural networks)
 
-**Cómo se aprende $T$** (`train.py → _fit_temperature`): TabNet se entrena con el **80%** de los datos. Con el **20% restante** (set de calibración) se minimiza la NLL (*Negative Log-Likelihood*) con L-BFGS para encontrar el $T$ óptimo. El resultado se guarda en `models/tabnet_temperature.pkl`.
+**How $T$ is learned** (`train.py → _fit_temperature`): TabNet is trained on **80%** of the data. On the remaining **20%** (calibration set), NLL is minimised with L-BFGS to find the optimal $T$, saved to `models/tabnet_temperature.pkl`.
 
-El mismo mecanismo se aplica a **XGBoost** (`models/xgb_temperature.pkl`) con el mismo esquema 80/20 y la misma función `_fit_temperature`.
+The same mechanism is applied to **XGBoost** (`models/xgb_temperature.pkl`) with the same 80/20 split and the same `_fit_temperature` function.
 
-**Cómo se aplica**: al predecir, se extraen los logits de las probabilidades brutas ($z = \log\frac{p}{1-p}$), se dividen entre $T$ y se pasa por sigmoid. Si el archivo de temperatura no existe, se usa $T = 1.0$ con un aviso.
+**How it is applied**: at inference time, logits are extracted from raw probabilities ($z = \log\frac{p}{1-p}$), divided by $T$, and passed through sigmoid. If the temperature file is missing, $T = 1.0$ is used with a warning.
 
-> **Razón del diseño dual**: TabNet requiere PyTorch (~1 GB de dependencias), incompatible con los límites prácticos de AWS Lambda. XGBoost es ligero (~50 MB) y se despliega sin problemas. Correr ambos modelos permite comparar sus predicciones directamente.
+> **Rationale for the dual design**: TabNet requires PyTorch (~1 GB of dependencies), incompatible with AWS Lambda's practical size constraints. XGBoost is lightweight (~50 MB) and deploys without issues. Running both models allows direct comparison of their predictions.
 
 ---
 
-## Infraestructura AWS
+## AWS Infrastructure
 
-| Recurso | Detalles |
-|---|---|
-| **Región** | `eu-west-1` |
+| Resource | Details |
+| --- | --- |
+| **Region** | `eu-west-1` |
 | **S3 bucket** | `f1-winner-predictor-2026` |
-| **Lambda** | `f1-winner-predictor` (imagen ECR) |
+| **Lambda** | `f1-winner-predictor` (ECR image) |
 | **ECR** | `606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest` |
-| **Athena** | DB: `f1_predictions`, tablas: `race_predictions`, `feature_importance` — configurado para consultas SQL ad-hoc; Looker Studio usa Google Sheets como fuente activa |
+| **Athena** | DB: `f1_predictions`, tables: `race_predictions`, `feature_importance` — configured for ad-hoc SQL queries; Looker Studio uses Google Sheets as the active source |
 
-### Estructura del bucket S3
+### S3 bucket structure
 
-```
+```text
 f1-winner-predictor-2026/
 ├── predictions/
-│   └── history.csv              # Una fila por carrera (XGB + TabNet fusionados)
+│   └── history.csv              # One row per race (XGB + TabNet merged)
 ├── models/
 │   ├── xgboost_f1_winner.pkl
 │   ├── label_encoders.pkl
-│   ├── xgb_temperature.pkl      # Temperature Scaling para XGBoost
-│   └── tabnet_temperature.pkl   # Temperature Scaling para TabNet
+│   ├── xgb_temperature.pkl      # Temperature Scaling for XGBoost
+│   └── tabnet_temperature.pkl   # Temperature Scaling for TabNet
 ├── metrics/
-│   ├── feature_importance.csv   # Importancia de features por modelo
-│   └── historical_performance.csv  # Predicciones vs resultados (datos de entrenamiento)
+│   ├── feature_importance.csv   # Feature importance by model
+│   └── historical_performance.csv  # Predictions vs results (training data)
 └── data/
-    └── race_results_raw.csv     # Datos históricos de entrenamiento
+    └── race_results_raw.csv     # Historical training data
 ```
 
-### Fusión XGB + TabNet en history.csv
+### XGB + TabNet merge in history.csv
 
-Lambda escribe `predicted_winner_xgb` y el script local escribe `predicted_winner_tab`. La función `append_to_history_csv()` fusiona ambas escrituras en la **misma fila** (indexed by `year` + `round`) sin sobreescribir columnas ya escritas por el otro modelo.
+Lambda writes `predicted_winner_xgb` and the local script writes `predicted_winner_tab`. The `append_to_history_csv()` function merges both writes into the **same row** (indexed by `year` + `round`) without overwriting columns already written by the other model.
 
 ---
 
 ## Google Sheets + Looker Studio
 
-Las predicciones y métricas se sincronizan automáticamente con Google Sheets (ID: `1Jw7wo3bqC2IS9MmfSJe6T2waQyp7LTCMv4al7gwhtPI`):
+Predictions and metrics are automatically synchronised with Google Sheets (ID: `1Jw7wo3bqC2IS9MmfSJe6T2waQyp7LTCMv4al7gwhtPI`):
 
-| Pestaña | Contenido | Cuándo se actualiza |
-|---|---|---|
-| **Sheet1** | `history.csv` — predicciones 2026 por carrera | Al predecir (sábado) y al registrar resultado (lunes) |
-| **feature_importance** | Importancia de cada feature en XGBoost y TabNet | Al reentrenar con `--upload-s3` |
-| **model_accuracy** | Accuracy, Brier Score y MAE posicional acumulados carrera a carrera | Al registrar el ganador real (lunes) |
+| Tab | Content | When updated |
+| --- | --- | --- |
+| **Sheet1** | `history.csv` — 2026 predictions per race | When predicting (Saturday) and when logging the result (Monday) |
+| **feature_importance** | Importance of each feature in XGBoost and TabNet | When retraining with `--upload-s3` |
+| **model_accuracy** | Cumulative accuracy, Brier Score and positional MAE race by race | When logging the actual winner (Monday) |
 
-### Gráficos en Looker Studio
+### Looker Studio charts
 
-| Gráfico | Fuente | Configuración |
-|---|---|---|
-| **Tabla de predicciones** | Sheet1 | Dimensiones: `event_name`, `predicted_winner_xgb`, `predicted_winner_tab`, `actual_winner`, `xgb_correct`, `tab_correct` / Métricas: `win_prob_xgboost`, `win_prob_tabnet` |
-| **Barras de importancia** | `feature_importance` | Dimensión Y: `feature` / Métricas X: `importance_xgboost` + `importance_tabnet` |
-| **Línea de accuracy** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_accuracy_cumul` + `tab_accuracy_cumul` |
-| **Línea de Brier Score** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_brier_cumul` + `tab_brier_cumul` (↓ mejor, mín 0) |
-| **Línea de MAE posicional** | `model_accuracy` | Dimensión X: `race_label` / Métricas Y: `xgb_pos_mae_cumul` + `tab_pos_mae_cumul` (↓ mejor, mín 0) |
+| Chart | Source | Configuration |
+| --- | --- | --- |
+| **Predictions table** | Sheet1 | Dimensions: `event_name`, `predicted_winner_xgb`, `predicted_winner_tab`, `actual_winner`, `xgb_correct`, `tab_correct` / Metrics: `win_prob_xgboost`, `win_prob_tabnet` |
+| **Feature importance bars** | `feature_importance` | Y dimension: `feature` / X metrics: `importance_xgboost` + `importance_tabnet` |
+| **Accuracy line** | `model_accuracy` | X dimension: `race_label` / Y metrics: `xgb_accuracy_cumul` + `tab_accuracy_cumul` |
+| **Brier Score line** | `model_accuracy` | X dimension: `race_label` / Y metrics: `xgb_brier_cumul` + `tab_brier_cumul` (↓ better, min 0) |
+| **Positional MAE line** | `model_accuracy` | X dimension: `race_label` / Y metrics: `xgb_pos_mae_cumul` + `tab_pos_mae_cumul` (↓ better, min 0) |
 
 ---
 
-## Métricas de evaluación
+## Evaluation metrics
 
-Cada vez que se registra el ganador real (`--record-result`), se calculan y sincronizan tres métricas acumuladas para comparar XGBoost y TabNet:
+Every time the actual winner is logged (`--record-result`), three cumulative metrics are computed and synchronised to compare XGBoost and TabNet:
 
-### Accuracy acumulada
+### Cumulative accuracy
 
-Fracción de carreras en las que el modelo acertó el ganador:
+Fraction of races in which the model correctly predicted the winner:
 
-$$\text{Accuracy} = \frac{\text{carreras acertadas}}{\text{carreras disputadas}}$$
+$$\text{Accuracy} = \frac{\text{correct predictions}}{\text{races completed}}$$
 
-Columnas: `xgb_accuracy_cumul`, `tab_accuracy_cumul`.
+Columns: `xgb_accuracy_cumul`, `tab_accuracy_cumul`.
 
-### Brier Score acumulado
+### Cumulative Brier Score
 
-Mide la **calibración de probabilidades** — no solo si acertó, sino cuán seguro estaba el modelo cuando acertó o falló. Cuanto más bajo, mejor (0 = perfecto, 1 = completamente equivocado con total confianza):
+Measures **probability calibration** — not just whether the model got it right, but how confident it was when it did or did not. Lower is better (0 = perfect, 1 = completely wrong with full confidence):
 
 $$BS = \frac{1}{N}\sum_{i=1}^{N}(p_i - y_i)^2$$
 
-Donde $p_i$ es la probabilidad asignada al piloto predicho e $y_i \in \{0, 1\}$ indica si realmente ganó.
+Where $p_i$ is the probability assigned to the predicted driver and $y_i \in \{0, 1\}$ indicates whether they actually won.
 
-**Cómo se calcula en el código** (`aws_utils.py → sync_model_accuracy_to_sheets`):
+**How it is computed** (`aws_utils.py → sync_model_accuracy_to_sheets`):
+
 ```python
 # xgb_brier_i = (win_prob_xgboost - xgb_correct)²
 df["xgb_brier"] = (df["win_prob_xgboost"] - df["xgb_correct"]) ** 2
 df["xgb_brier_cumul"] = df["xgb_brier"].expanding().mean()
 ```
 
-Columnas: `xgb_brier`, `xgb_brier_cumul`, `tab_brier`, `tab_brier_cumul`.
+Columns: `xgb_brier`, `xgb_brier_cumul`, `tab_brier`, `tab_brier_cumul`.
 
-### MAE posicional acumulado
+### Cumulative positional MAE
 
-Mide **cuántas posiciones se equivocó** el modelo respecto al 1er puesto. Si el modelo predijo a VER y VER terminó P5, el error es 4. Si acertó el ganador, el error es 0:
+Measures **how many positions the model was off** relative to P1. If the model predicted VER and VER finished P5, the error is 4. If the predicted driver won, the error is 0:
 
 $$\text{MAE}_{\text{pos}} = \frac{1}{N}\sum_{i=1}^{N}|f_i - 1|$$
 
-Donde $f_i$ es la posición en carrera del piloto que el modelo predijo como ganador.
+Where $f_i$ is the finishing position of the driver predicted as race winner.
 
-**Cómo se obtiene** (`predict.py → record_actual_result`): al registrar el resultado real, FastF1 descarga la clasificación de carrera y busca en qué posición terminó el piloto predicho por cada modelo. Ese dato se guarda en `xgb_predicted_finish_pos` / `tab_predicted_finish_pos` dentro de `history.csv`.
+**How it is obtained** (`predict.py → record_actual_result`): when logging the actual result, FastF1 downloads the race classification and looks up the finishing position of each model's predicted winner. That data is stored in `xgb_predicted_finish_pos` / `tab_predicted_finish_pos` inside `history.csv`.
 
 ```python
-# En record_actual_result():
+# Inside record_actual_result():
 xgb_finish_pos = results[results["Abbreviation"] == xgb_pred]["Position"].values[0]
-# Error_i = |pos_final - 1|  →  0 si ganó, 4 si fue P5, etc.
+# Error_i = |final_pos - 1|  →  0 if won, 4 if P5, etc.
 ```
 
-Columnas: `xgb_predicted_finish_pos`, `xgb_pos_mae_cumul`, `tab_predicted_finish_pos`, `tab_pos_mae_cumul`.
+Columns: `xgb_predicted_finish_pos`, `xgb_pos_mae_cumul`, `tab_predicted_finish_pos`, `tab_pos_mae_cumul`.
 
 ---
 
-## Configuración inicial (primera vez)
+## Initial setup (first run)
 
-### 1. Variables de entorno
+### 1. Environment variables
 
-Crea `.env` en la raíz del proyecto (`TFG/`):
+Create `.env` at the project root (`TFG/`):
 
 ```env
 AWS_PROFILE=f1-developer
@@ -263,15 +266,17 @@ AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 ```
 
-### 2. Credenciales de Google Sheets
+### 2. Google Sheets credentials
 
-Descarga el JSON de la service account `f1-sheets-sync@f1-tfg.iam.gserviceaccount.com` y colócalo en:
-```
+Download the JSON for the service account `f1-sheets-sync@f1-tfg.iam.gserviceaccount.com` and place it at:
+
+```text
 f1-winner-predictor/.google_credentials.json
 ```
-Este archivo está en `.gitignore` y nunca debe subirse al repositorio.
 
-### 3. Construir la imagen Docker
+This file is in `.gitignore` and must never be committed to the repository.
+
+### 3. Build the Docker image
 
 ```powershell
 cd "TFG"
@@ -280,62 +285,63 @@ docker build -t f1-tabnet:latest .
 
 ---
 
-## Flujo semanal de uso
+## Weekly workflow
 
-### Viernes (opcional) — Reentrenar modelos
+### Friday (optional) — Retrain models
 
-Solo necesario si hay nuevas carreras disputadas o se quieren mejorar los modelos.
+Only needed when new races have been run or model improvements are desired.
 
 ```powershell
-# Entrenamiento completo con optimización de hiperparámetros y subida a S3:
+# Full training with hyperparameter optimisation and S3 upload:
 docker compose run --rm trainer python train.py --model all --upload-s3 --refresh-data --optimize
 
-# Sin optimización (más rápido, usa hiperparámetros por defecto):
+# Without optimisation (faster, uses default hyperparameters):
 docker compose run --rm trainer python train.py --model all --upload-s3 --refresh-data
 
-# Solo un modelo:
+# Single model:
 docker compose run --rm trainer python train.py --model xgboost --upload-s3
 docker compose run --rm trainer python train.py --model tabnet
 ```
 
-Al terminar se actualizan automáticamente:
-- XGBoost y encoders en S3 (disponibles para Lambda)
-- TabNet y scaler en `models/` local
-- Pestaña `feature_importance` de Google Sheets
+On completion the following are automatically updated:
 
-### Después de la clasificación (sábado) — Predecir
+- XGBoost and encoders in S3 (available for Lambda)
+- TabNet and scaler in `models/` locally
+- `feature_importance` tab in Google Sheets
 
-**XGBoost vía Lambda** (invocar manualmente tras la clasificación):
+### After qualifying (Saturday) — Predict
+
+**XGBoost via Lambda** (invoke manually after qualifying):
 
 ```powershell
 aws lambda invoke --function-name f1-winner-predictor `
   --payload '{"year":2026,"round":2}' response.json --region eu-west-1
 ```
 
-**TabNet vía Docker** (manual, post-clasificación):
+**TabNet via Docker** (manual, post-qualifying):
 
 ```powershell
 docker compose run --rm trainer python predict.py --round 2 --year 2026
 ```
 
-Ambas predicciones se fusionan en una única fila en S3 y se sincronizan con Google Sheets.
+Both predictions are merged into a single row in S3 and synchronised with Google Sheets.
 
-### Después de la clasificación (sábado) — Ver probabilidades de todos los pilotos
+### After qualifying (Saturday) — Full probability table
 
-Para consultar la distribución completa de probabilidades de victoria de todos los pilotos **sin escribir nada en S3**, usa el servicio `proba`:
+To view the complete win-probability distribution for all drivers **without writing anything to S3**, use the `proba` service:
 
 ```powershell
 docker compose run --rm proba --round 3
 docker compose run --rm proba --round 3 --year 2026
 ```
 
-El script carga los modelos locales (`models/`) y muestra una tabla ordenada por probabilidad XGBoost. La tabla se guarda automáticamente en `data/processed/proba_table_{year}_R{round:02d}.csv`:
+The script loads local models (`models/`) and displays a table sorted by XGBoost probability. The table is automatically saved to `data/processed/proba_table_{year}_R{round:02d}.csv`:
 
-```
+```text
 +==================================================+
-|      2026  |  Ronda 3  |  JAPANESE GRAND PRIX    |
+|      2026  |  Round 3  |  JAPANESE GRAND PRIX    |
 +==================================================+
-  #   PILOTO      XGBoost     TabNet
+  #   DRIVER      XGBoost     TabNet
   ----------------------------------------------------
   1   ANT           60.0%      50.0% <--
   2   RUS           21.1%      47.6%
@@ -343,100 +349,100 @@ El script carga los modelos locales (`models/`) y muestra una tabla ordenada por
   4   HAM            2.3%       0.2%
   5   VER            2.1%       0.0%
   ...
-[INFO] Tabla guardada en: data/processed/proba_table_2026_R03.csv
+[INFO] Table saved to: data/processed/proba_table_2026_R03.csv
 ```
 
-> Las probabilidades de cada modelo suman 100% tras normalizar las salidas del clasificador binario. TabNet distribuye más probabilidad entre varios pilotos mientras que XGBoost tiende a concentrarla más en el favorito.
+> Each model's probabilities sum to 100% after normalising binary classifier outputs. TabNet spreads more probability across several drivers while XGBoost tends to concentrate it more on the favourite.
 
-### Después de la carrera (lunes) — Registrar resultado real
+### After the race (Monday) — Log the actual result
 
 ```powershell
-# FastF1 descarga automáticamente el ganador desde la API:
+# FastF1 automatically downloads the winner from the API:
 docker compose run --rm trainer python predict.py --round 2 --year 2026 --record-result
 ```
 
-Esto:
-1. Descarga el resultado desde FastF1
-2. Escribe `actual_winner`, `xgb_correct`, `tab_correct`, `xgb_predicted_finish_pos` y `tab_predicted_finish_pos` en S3
-3. Sincroniza Sheet1 con el resultado real
-4. Actualiza la pestaña `model_accuracy` con accuracy, Brier Score y MAE posicional acumulados
-5. Guarda `metrics/model_accuracy/model_accuracy.csv` en S3 para Athena
+This:
+
+1. Downloads the result from FastF1
+2. Writes `actual_winner`, `xgb_correct`, `tab_correct`, `xgb_predicted_finish_pos` and `tab_predicted_finish_pos` to S3
+3. Synchronises Sheet1 with the actual result
+4. Updates the `model_accuracy` tab with cumulative accuracy, Brier Score and positional MAE
+5. Saves `metrics/model_accuracy/model_accuracy.csv` to S3 for Athena
 
 ---
 
-## Despliegue (`deploy.ps1`)
+## Deployment (`deploy.ps1`)
 
-El script `deploy.ps1` automatiza todo el pipeline de despliegue. Acepta cuatro modos:
+`deploy.ps1` automates the full deployment pipeline. It accepts four modes:
 
-| Modo | Qué hace |
-|---|---|
-| `models` | Reentrena XGBoost + TabNet y sube artefactos a S3 (sin tocar Lambda) |
-| `lambda` | Rebuild imagen Docker → push ECR → update función Lambda (sin reentrenar) |
-| `predict` | Invoca Lambda (XGBoost) + ejecuta TabNet local, genera snapshot y CSV de probabilidades |
-| `all` | `models` + `lambda` + `predict` en orden |
+| Mode | What it does |
+| --- | --- |
+| `models` | Retrains XGBoost + TabNet and uploads artefacts to S3 (Lambda untouched) |
+| `lambda` | Rebuilds Docker image → pushes to ECR → updates Lambda function (no retraining) |
+| `predict` | Invokes Lambda (XGBoost) + runs local TabNet, generates snapshot and probability CSV |
+| `all` | `models` + `lambda` + `predict` in order |
 
 ```powershell
-# Solo redesplegar Lambda (código cambiado, modelo no):
+# Redeploy Lambda only (code changed, model unchanged):
 .\deploy.ps1 -Mode lambda
 
-# Reentrenar y subir modelos a S3 (sin rebuild Lambda):
+# Retrain and upload models to S3 (no Lambda rebuild):
 .\deploy.ps1 -Mode models
 
-# Pipeline completo con datos frescos:
+# Full pipeline with fresh data:
 .\deploy.ps1 -Mode all -Refresh
 
-# Pipeline completo con optimización de hiperparámetros:
+# Full pipeline with hyperparameter optimisation:
 .\deploy.ps1 -Mode all -Refresh -Optimize
 ```
 
-> Los archivos `.py` se montan como volúmenes durante el entrenamiento, por lo que los cambios locales son inmediatos sin necesidad de reconstruir la imagen Docker del trainer.
+> `.py` files are mounted as volumes during training, so local changes take effect immediately without rebuilding the trainer Docker image.
 
 ---
 
-## Fins de semana sprint
+## Sprint weekends
 
-En un sprint weekend el calendario difiere del habitual:
+On a sprint weekend the schedule differs from a standard race weekend:
 
-| Sesión | GP normal | GP sprint |
-|---|---|---|
-| Viernes mañana | FP1 | FP1 |
-| Viernes tarde | FP2 | Sprint Qualifying (SQ) |
-| Sábado mañana | FP3 | Sprint Race (S) |
-| Sábado tarde | Qualifying (Q) | Qualifying (Q) |
+| Session | Normal GP | Sprint GP |
+| --- | --- | --- |
+| Friday morning | FP1 | FP1 |
+| Friday afternoon | FP2 | Sprint Qualifying (SQ) |
+| Saturday morning | FP3 | Sprint Race (S) |
+| Saturday afternoon | Qualifying (Q) | Qualifying (Q) |
 
-Esto genera dos problemas estructurales para el modelo si no se trata explícitamente:
+This creates two structural problems for the model if not handled explicitly:
 
-### 1. FP2/FP3 no existen → fallback a FP1
+### 1. FP2/FP3 do not exist → fallback to FP1
 
-`fetch_practice_pace` intenta cargar FP2 y FP3. En un sprint weekend ambas sesiones no existen y FastF1 lanza una excepción. Sin corrección, `fp2_long_run_pace_gap_s` y `fp3_gap_to_best_s` se rellenarían con `0` para **todos** los pilotos tras el `fillna(0)` de `apply_features`, borrando toda la información de ritmo de práctica y haciendo que el modelo no pueda diferenciar a los pilotos por pace.
+`fetch_practice_pace` tries to load FP2 and FP3. On a sprint weekend neither session exists and FastF1 raises an exception. Without a fix, `fp2_long_run_pace_gap_s` and `fp3_gap_to_best_s` would be filled with `0` for **all** drivers after the `fillna(0)` in `apply_features`, erasing all practice-pace information and making the model unable to differentiate drivers by pace.
 
-**Fix implementado** (`fetch_practice_pace`): cuando ambas sesiones vuelven vacías, se carga FP1. Los gaps de mejor vuelta de FP1 por piloto (respecto al más rápido) se usan como sustituto para ambas columnas. Es un proxy degradado pero real —FP1 tiene datos de ritmo real, al contrario que un cero artificial.
+**Fix implemented** (`fetch_practice_pace`): when both sessions return empty, FP1 is loaded instead. The per-driver best-lap gaps from FP1 (relative to the fastest driver) are used as a substitute for both columns. It is a degraded but real proxy — FP1 contains actual pace data, unlike an artificial zero.
 
-### 2. Puntos del Sprint Race no contabilizados en el campeonato
+### 2. Sprint Race points not counted in the championship
 
-`race_results_raw.csv` solo almacenaba puntos de la carrera principal. En un sprint weekend los pilotos obtienen puntos adicionales del Sprint Race (hasta 8 pts por P1 desde 2023). Si esos puntos no se incluyen, las features `driver_champ_points` y `constructor_champ_points` quedan subestimadas a partir de esa ronda, contaminando el cálculo de standings de todas las carreras siguientes de la temporada.
+`race_results_raw.csv` previously stored only main-race points. On a sprint weekend drivers earn additional points from the Sprint Race (up to 8 pts for P1 since 2023). If those points are omitted, `driver_champ_points` and `constructor_champ_points` are understated from that round onwards, contaminating standings for all subsequent races in the season.
 
-**Fix implementado** (`fetch_season_results`): se intenta cargar la sesión `"S"` (Sprint Race) para cada ronda. Si existe, los puntos de sprint de cada piloto se suman a los de la carrera principal en la columna `points` de `race_results_raw.csv`. Como `_championship_standings` y `_enrich_live_from_history` suman esa columna directamente, los standings quedan correctos de forma automática sin cambios en `feature_engineering.py`.
+**Fix implemented** (`fetch_season_results`): the `"S"` session (Sprint Race) is attempted for each round. If it exists, each driver's sprint points are added to their main-race points in the `points` column of `race_results_raw.csv`. Since `_championship_standings` and `_enrich_live_from_history` sum that column directly, standings are automatically correct without any changes to `feature_engineering.py`.
 
-### Impacto del fix
+### Impact of the fix
 
-| Feature | Sin fix (sprint weekend) | Con fix |
-|---|---|---|
-| `fp2_long_run_pace_gap_s` | `0` para todos | Gap real desde FP1 |
-| `fp3_gap_to_best_s` | `0` para todos | Gap real desde FP1 |
-| `sprint_race_position` | `0` (sin sprint) | Posición real del Sprint Race |
-| `driver_champ_points` | Subestimado | Exacto (main race + sprint) |
-| `constructor_champ_points` | Subestimado | Exacto (main race + sprint) |
+| Feature | Without fix (sprint weekend) | With fix |
+| --- | --- | --- |
+| `fp2_long_run_pace_gap_s` | `0` for all drivers | Real gap from FP1 |
+| `fp3_gap_to_best_s` | `0` for all drivers | Real gap from FP1 |
+| `sprint_race_position` | `0` (no sprint) | Actual Sprint Race position |
+| `driver_champ_points` | Understated | Exact (main race + sprint) |
+| `constructor_champ_points` | Understated | Exact (main race + sprint) |
 
-> **Nota**: Tras cualquier cambio en `data_collection.py` hay que regenerar `race_results_raw.csv` con `--refresh-data` para que los datos históricos reflejen el fix.
+> **Note**: after any change to `data_collection.py`, regenerate `race_results_raw.csv` with `--refresh-data` so that historical data reflects the fix.
 
 ---
 
-## Seguridad
+## Security
 
-- Las credenciales AWS van en `.env` (gitignored) o en variables de entorno del sistema
-- Las credenciales de Google van en `.google_credentials.json` (gitignored)
-- Los artefactos de modelo (`models/*.pkl`, `models/*.zip`) y los datos (`data/`) están en `.gitignore`
-- El directorio `package/` (build de Lambda) está en `.gitignore`
-- Nunca se hardcodean claves en el código fuente
-
+- AWS credentials go in `.env` (gitignored) or system environment variables
+- Google credentials go in `.google_credentials.json` (gitignored)
+- Model artefacts (`models/*.pkl`, `models/*.zip`) and data (`data/`) are in `.gitignore`
+- The `package/` directory (Lambda build) is in `.gitignore`
+- No credentials are hardcoded in source files

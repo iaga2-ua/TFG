@@ -4,3 +4,5 @@ models/*.pkl
 models/*.zip
 __pycache__/
 .env
+memoria/
+diario.md

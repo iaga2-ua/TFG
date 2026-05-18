@@ -6,3 +6,4 @@ __pycache__/
 .env
 memoria/
 diario.md
+.vscode/settings.json

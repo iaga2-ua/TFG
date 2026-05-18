@@ -1,6 +1,6 @@
 # F1 Winner Predictor 2026
 
-Predicts the winner of each Formula 1 Grand Prix based on Saturday qualifying data. Combines two machine learning models — **XGBoost** (deployed on AWS Lambda) and **TabNet** (local inference) — and synchronises predictions and metrics with Google Sheets for visualisation in Looker Studio.
+Predicts the winner of each Formula 1 Grand Prix based on Saturday qualifying data. Combines two machine learning models, **XGBoost** (deployed on AWS Lambda) and **TabNet** (local inference), and synchronises predictions and metrics with Google Sheets for visualisation in Looker Studio.
 
 ---
 
@@ -31,7 +31,7 @@ data_collection.py  ──►  feature_engineering.py
           ▼                     ▼
     Google Sheets           Athena
     (Looker Studio       (available for
-     — active source)    ad-hoc SQL queries)
+      (active source)    ad-hoc SQL queries)
 ```
 
 ---
@@ -94,7 +94,7 @@ f1-winner-predictor/
 
 ## Models
 
-### XGBoost (cloud — AWS Lambda)
+### XGBoost (cloud: AWS Lambda)
 
 - Binary classifier (`is_winner = 1` for the race winner)
 - `scale_pos_weight = 5`: partial class-imbalance correction. The full value (21) over-concentrates probabilities on the favourite; 5 maintains a realistic spread across the top drivers.
@@ -125,7 +125,7 @@ $$p_{\text{cal}} = \frac{1}{1 + e^{-z/T}}, \quad p_{\text{norm}} = \frac{p_{\tex
 - Trained with **recency oversampling** `{2023:1, 2024:1, 2025:2, 2026:2}`: rows from recent seasons are duplicated in the training set. TabNet does not natively support `sample_weight`; row duplication is equivalent.
 - Artefacts locally: `models/tabnet_model.zip` + `models/scaler.pkl` + `models/tabnet_temperature.pkl`
 
-#### Probability calibration — TabNet
+#### Probability calibration: TabNet
 
 Neural networks tend to be **overconfident**: the final softmax produces probabilities close to 1 even under uncertainty. This is corrected with **Temperature Scaling**, the standard post-hoc calibration technique for neural networks ([Guo et al., 2017](https://arxiv.org/abs/1706.04599)).
 
@@ -155,7 +155,7 @@ The same mechanism is applied to **XGBoost** (`models/xgb_temperature.pkl`) with
 | **S3 bucket** | `f1-winner-predictor-2026` |
 | **Lambda** | `f1-winner-predictor` (ECR image) |
 | **ECR** | `606756239522.dkr.ecr.eu-west-1.amazonaws.com/f1-winner-predictor:latest` |
-| **Athena** | DB: `f1_predictions`, tables: `race_predictions`, `feature_importance` — configured for ad-hoc SQL queries; Looker Studio uses Google Sheets as the active source |
+| **Athena** | DB: `f1_predictions`, tables: `race_predictions`, `feature_importance`; configured for ad-hoc SQL queries; Looker Studio uses Google Sheets as the active source |
 
 ### S3 bucket structure
 
@@ -187,7 +187,7 @@ Predictions and metrics are automatically synchronised with Google Sheets (ID: `
 
 | Tab | Content | When updated |
 | --- | --- | --- |
-| **Sheet1** | `history.csv` — 2026 predictions per race | When predicting (Saturday) and when logging the result (Monday) |
+| **Sheet1** | `history.csv`; 2026 predictions per race | When predicting (Saturday) and when logging the result (Monday) |
 | **feature_importance** | Importance of each feature in XGBoost and TabNet | When retraining with `--upload-s3` |
 | **model_accuracy** | Cumulative accuracy, Brier Score and positional MAE race by race | When logging the actual winner (Monday) |
 
@@ -217,7 +217,7 @@ Columns: `xgb_accuracy_cumul`, `tab_accuracy_cumul`.
 
 ### Cumulative Brier Score
 
-Measures **probability calibration** — not just whether the model got it right, but how confident it was when it did or did not. Lower is better (0 = perfect, 1 = completely wrong with full confidence):
+Measures **probability calibration**: not just whether the model got it right, but how confident it was when it did or did not. Lower is better (0 = perfect, 1 = completely wrong with full confidence):
 
 $$BS = \frac{1}{N}\sum_{i=1}^{N}(p_i - y_i)^2$$
 
@@ -287,7 +287,7 @@ docker build -t f1-tabnet:latest .
 
 ## Weekly workflow
 
-### Friday (optional) — Retrain models
+### Friday (optional): Retrain models
 
 Only needed when new races have been run or model improvements are desired.
 
@@ -309,7 +309,7 @@ On completion the following are automatically updated:
 - TabNet and scaler in `models/` locally
 - `feature_importance` tab in Google Sheets
 
-### After qualifying (Saturday) — Predict
+### After qualifying (Saturday): Predict
 
 **XGBoost via Lambda** (invoke manually after qualifying):
 
@@ -326,7 +326,7 @@ docker compose run --rm trainer python predict.py --round 2 --year 2026
 
 Both predictions are merged into a single row in S3 and synchronised with Google Sheets.
 
-### After qualifying (Saturday) — Full probability table
+### After qualifying (Saturday): Full probability table
 
 To view the complete win-probability distribution for all drivers **without writing anything to S3**, use the `proba` service:
 
@@ -354,7 +354,7 @@ The script loads local models (`models/`) and displays a table sorted by XGBoost
 
 > Each model's probabilities sum to 100% after normalising binary classifier outputs. TabNet spreads more probability across several drivers while XGBoost tends to concentrate it more on the favourite.
 
-### After the race (Monday) — Log the actual result
+### After the race (Monday): Log the actual result
 
 ```powershell
 # FastF1 automatically downloads the winner from the API:
@@ -417,7 +417,7 @@ This creates two structural problems for the model if not handled explicitly:
 
 `fetch_practice_pace` tries to load FP2 and FP3. On a sprint weekend neither session exists and FastF1 raises an exception. Without a fix, `fp2_long_run_pace_gap_s` and `fp3_gap_to_best_s` would be filled with `0` for **all** drivers after the `fillna(0)` in `apply_features`, erasing all practice-pace information and making the model unable to differentiate drivers by pace.
 
-**Fix implemented** (`fetch_practice_pace`): when both sessions return empty, FP1 is loaded instead. The per-driver best-lap gaps from FP1 (relative to the fastest driver) are used as a substitute for both columns. It is a degraded but real proxy — FP1 contains actual pace data, unlike an artificial zero.
+**Fix implemented** (`fetch_practice_pace`): when both sessions return empty, FP1 is loaded instead. The per-driver best-lap gaps from FP1 (relative to the fastest driver) are used as a substitute for both columns. It is a degraded but real proxy. FP1 contains actual pace data, unlike an artificial zero.
 
 ### 2. Sprint Race points not counted in the championship
 

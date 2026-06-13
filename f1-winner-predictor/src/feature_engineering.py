@@ -33,7 +33,8 @@ def _driver_wet_win_rate(df: pd.DataFrame, window: int = 10) -> pd.Series:
     df = df.sort_values(["driver_abbr", "year", "round"])
     
     def calc_wet_rate(g):
-        wet_wins = (g["is_winner"] & g["is_wet_qualifying"].fillna(0).astype(bool)).astype(float)
+        wet_wins = (g["is_winner"].fillna(0).astype(bool) &
+                    g["is_wet_qualifying"].fillna(0).astype(bool)).astype(float)
         return wet_wins.shift(1).rolling(window, min_periods=1).mean()
 
     return df.groupby("driver_abbr").apply(calc_wet_rate).reset_index(level=0, drop=True)
@@ -233,8 +234,12 @@ def build_features(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, dict]
     df["race_number"] = df["round"]
 
     from config import FEATURE_COLS, TARGET_COL
+
+    # El entrenamiento solo puede usar carreras con etiqueta conocida.
+    df = df[df[TARGET_COL].notna()].copy()
+
     X = df[FEATURE_COLS].fillna(0).reset_index(drop=True)
-    y = df[TARGET_COL].reset_index(drop=True)
+    y = df[TARGET_COL].fillna(0).astype(int).reset_index(drop=True)
     ctx = df[["driver_abbr", "year", "round"]].reset_index(drop=True)
 
     return X, y, encoders, ctx
